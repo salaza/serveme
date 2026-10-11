@@ -351,6 +351,11 @@ ipcMain.handle('server:setup', async (_, { server, downloadUrl, jarName, acceptE
   acceptEula: boolean;
 }) => {
   try {
+    const allServers = loadServers();
+    if (allServers.some(s => s.name.trim().toLowerCase() === server.name.trim().toLowerCase() && s.id !== server.id)) {
+      return { success: false, error: `A server named "${server.name}" already exists. Please choose a different name.` };
+    }
+
     if (!fs.existsSync(server.path)) {
       fs.mkdirSync(server.path, { recursive: true });
     }
@@ -1864,6 +1869,11 @@ ipcMain.handle('gmod:setup', async (_, options: CreateGModServerOptions) => {
   const serverId = server.id;
 
   try {
+    const allServers = loadServers();
+    if (allServers.some(s => s.name.trim().toLowerCase() === server.name.trim().toLowerCase() && s.id !== server.id)) {
+      return { success: false, error: `A server named "${server.name}" already exists. Please choose a different name.` };
+    }
+
     if (!fs.existsSync(server.path)) {
       fs.mkdirSync(server.path, { recursive: true });
     }
@@ -1902,9 +1912,57 @@ ipcMain.handle('gmod:setup', async (_, options: CreateGModServerOptions) => {
           shell: false
         });
 
+        // Real-time progress monitor: SteamCMD flushes progress updates to console_log.txt
+        const consoleLogPath = path.join(path.dirname(steamcmdExe), 'logs', 'console_log.txt');
+        let lastLogOffset = 0;
+        if (fs.existsSync(consoleLogPath)) {
+          try {
+            lastLogOffset = fs.statSync(consoleLogPath).size;
+          } catch {}
+        }
+
+        const pollInterval = setInterval(() => {
+          if (!fs.existsSync(consoleLogPath)) return;
+          try {
+            const stat = fs.statSync(consoleLogPath);
+            if (stat.size > lastLogOffset) {
+              const readLen = stat.size - lastLogOffset;
+              const buf = Buffer.alloc(readLen);
+              const fd = fs.openSync(consoleLogPath, 'r');
+              fs.readSync(fd, buf, 0, readLen, lastLogOffset);
+              fs.closeSync(fd);
+              lastLogOffset = stat.size;
+
+              const text = buf.toString('utf-8');
+              const matches = [...text.matchAll(/progress:\s*([0-9.]+)(?:\s*\(\s*([0-9]+)\s*\/\s*([0-9]+)\s*\))?/gi)];
+              if (matches.length > 0) {
+                const lastMatch = matches[matches.length - 1];
+                const rawPct = parseFloat(lastMatch[1]);
+                const isVerifying = text.includes('verifying') || text.includes('validating');
+                const isPreallocating = text.includes('preallocating');
+
+                let byteDetails = '';
+                if (lastMatch[2] && lastMatch[3]) {
+                  const cur = parseInt(lastMatch[2], 10);
+                  const tot = parseInt(lastMatch[3], 10);
+                  byteDetails = `${formatBytes(cur)} / ${formatBytes(tot)}`;
+                }
+
+                const stageName = isVerifying
+                  ? "Verifying Garry's Mod server files..."
+                  : isPreallocating
+                  ? 'Preallocating disk space for server files...'
+                  : "Downloading Garry's Mod Dedicated Server...";
+
+                sendProgress(stageName, rawPct, byteDetails);
+              }
+            }
+          } catch {}
+        }, 250);
+
         child.stdout.on('data', (chunk) => {
           const text = chunk.toString();
-          // Match all progress updates in chunk (SteamCMD updates via \r)
+          // Backup check from stdout
           const matches = [...text.matchAll(/progress:\s*([0-9.]+)(?:\s*\(\s*([0-9]+)\s*\/\s*([0-9]+)\s*\))?/gi)];
           if (matches.length > 0) {
             const lastMatch = matches[matches.length - 1];
@@ -1936,6 +1994,7 @@ ipcMain.handle('gmod:setup', async (_, options: CreateGModServerOptions) => {
         });
 
         child.on('close', async (code) => {
+          clearInterval(pollInterval);
           const srcdsPath = path.join(server.path, 'srcds.exe');
           if (fs.existsSync(srcdsPath)) {
             resolve();

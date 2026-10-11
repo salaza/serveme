@@ -188,6 +188,7 @@ export const AppContent: React.FC = () => {
         onClose={() => setIsCreateModalOpen(false)}
         onServerCreated={handleServerCreated}
         settings={settings}
+        existingServers={servers}
       />
 
       <SettingsModal

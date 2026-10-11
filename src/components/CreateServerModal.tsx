@@ -34,18 +34,24 @@ interface CreateServerModalProps {
   onClose: () => void;
   onServerCreated: (server: ServerInstance) => void;
   settings: AppSettings;
+  existingServers?: ServerInstance[];
 }
 
 export const CreateServerModal: React.FC<CreateServerModalProps> = ({
   isOpen,
   onClose,
   onServerCreated,
-  settings
+  settings,
+  existingServers = []
 }) => {
   const [gameType, setGameType] = useState<GameType>('minecraft');
   const [serverName, setServerName] = useState('My Minecraft Server');
   const [serverPath, setServerPath] = useState('');
   const [port, setPort] = useState(25565);
+
+  const isDuplicateName = existingServers.some(
+    (s) => s.name.trim().toLowerCase() === serverName.trim().toLowerCase()
+  );
 
   // Minecraft specific state
   const [loader, setLoader] = useState<MinecraftLoader>('fabric');
@@ -165,6 +171,15 @@ export const CreateServerModal: React.FC<CreateServerModalProps> = ({
   };
 
   const handleCreate = async () => {
+    if (!serverName.trim()) {
+      setError('Server name cannot be empty.');
+      return;
+    }
+    if (isDuplicateName) {
+      setError(`A server named "${serverName.trim()}" already exists. Please choose a unique name.`);
+      return;
+    }
+
     let unsubscribeProgress: (() => void) | null = null;
     try {
       setError(null);
@@ -315,9 +330,9 @@ export const CreateServerModal: React.FC<CreateServerModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4 animate-in fade-in duration-200">
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-2xl max-h-[92vh] flex flex-col shadow-2xl overflow-hidden">
+      <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-2xl max-h-[88vh] flex flex-col shadow-2xl overflow-hidden my-auto">
         {/* Header */}
-        <div className="px-6 py-4 border-b border-slate-800 flex items-center justify-between bg-slate-900/80">
+        <div className="px-6 py-4 border-b border-slate-800 flex items-center justify-between bg-slate-900/80 shrink-0">
           <div className="flex items-center gap-3">
             <div
               className={`w-10 h-10 rounded-xl flex items-center justify-center font-bold ${
@@ -345,7 +360,7 @@ export const CreateServerModal: React.FC<CreateServerModalProps> = ({
         </div>
 
         {/* Game Selection Selector */}
-        <div className="px-6 py-3 bg-slate-950/60 border-b border-slate-800 flex items-center gap-3">
+        <div className="px-6 py-3 bg-slate-950/60 border-b border-slate-800 flex items-center gap-3 shrink-0">
           <span className="text-xs font-semibold text-slate-400">Game:</span>
           <button
             type="button"
@@ -392,9 +407,19 @@ export const CreateServerModal: React.FC<CreateServerModalProps> = ({
                 value={serverName}
                 onChange={(e) => setServerName(e.target.value)}
                 disabled={isInstalling}
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 transition"
+                className={`w-full bg-slate-950 border rounded-xl px-3.5 py-2 text-xs text-white placeholder-slate-500 focus:outline-none transition ${
+                  isDuplicateName
+                    ? 'border-rose-500/80 focus:border-rose-500 ring-1 ring-rose-500/20'
+                    : 'border-slate-800 focus:border-emerald-500'
+                }`}
                 placeholder={gameType === 'gmod' ? "My Garry's Mod Server" : 'Survival SMP'}
               />
+              {isDuplicateName && (
+                <p className="text-[11px] text-rose-400 font-medium mt-1.5 flex items-center gap-1">
+                  <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                  <span>A server named &quot;{serverName.trim()}&quot; already exists.</span>
+                </p>
+              )}
             </div>
 
             <div>
@@ -690,78 +715,77 @@ export const CreateServerModal: React.FC<CreateServerModalProps> = ({
         </div>
 
         {/* Footer */}
-        <div className="px-6 py-4 border-t border-slate-800 bg-slate-900/90 flex flex-col sm:flex-row items-center justify-between gap-4">
-          <div className="text-xs text-slate-400 flex-1 w-full">
-            {isInstalling && (
-              <div className="space-y-2 w-full">
-                <div className="flex items-center justify-between text-xs font-medium">
-                  <span className={`flex items-center gap-2 truncate pr-2 ${gameType === 'gmod' ? 'text-blue-400' : 'text-emerald-400'}`}>
-                    <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
-                    <span className="truncate">{installStatus}</span>
+        <div className="px-6 py-4 border-t border-slate-800 bg-slate-900 shrink-0">
+          {isInstalling ? (
+            <div className="space-y-2.5 w-full">
+              <div className="flex items-center justify-between gap-3 text-xs font-medium">
+                <span className={`flex items-center gap-2 min-w-0 ${gameType === 'gmod' ? 'text-blue-400' : 'text-emerald-400'}`}>
+                  <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                  <span className="truncate font-semibold">{installStatus}</span>
+                </span>
+                {typeof installPercent === 'number' && (
+                  <span className="font-mono text-white font-bold text-xs shrink-0 bg-slate-800 px-2 py-0.5 rounded-lg border border-slate-700">
+                    {installPercent.toFixed(1)}%
                   </span>
-                  {typeof installPercent === 'number' && (
-                    <span className="font-mono text-white font-bold shrink-0 text-xs">
-                      {installPercent.toFixed(1)}%
-                    </span>
-                  )}
-                </div>
-                {/* Progress Bar */}
-                <div className="w-full bg-slate-950 rounded-full h-2 overflow-hidden border border-slate-800">
-                  <div
-                    className={`h-full transition-all duration-150 ${
-                      gameType === 'gmod' ? 'bg-blue-500' : 'bg-emerald-500'
-                    }`}
-                    style={{
-                      width: `${Math.min(100, Math.max(typeof installPercent === 'number' ? installPercent : 5, 2))}%`
-                    }}
-                  />
-                </div>
-                {installDetails && (
-                  <div className="flex items-center justify-between text-[11px] text-slate-400 font-mono">
-                    <span className="truncate">{installDetails}</span>
-                    {typeof installPercent === 'number' && (
-                      <span className="shrink-0 text-slate-500 ml-2">
-                        {gameType === 'gmod' ? 'Steam Dedicated Server' : 'Minecraft Server'}
-                      </span>
-                    )}
-                  </div>
                 )}
               </div>
-            )}
-          </div>
 
-          <div className="flex items-center gap-3 shrink-0 self-end sm:self-center">
-            <button
-              type="button"
-              onClick={onClose}
-              disabled={isInstalling}
-              className="px-4 py-2 text-xs font-medium text-slate-400 hover:text-white rounded-xl hover:bg-slate-800 transition"
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              onClick={handleCreate}
-              disabled={isInstalling || !serverPath.trim()}
-              className={`px-5 py-2 text-xs font-semibold text-white disabled:opacity-50 disabled:pointer-events-none rounded-xl transition flex items-center gap-2 shadow-lg ${
-                gameType === 'gmod'
-                  ? 'bg-blue-600 hover:bg-blue-500 shadow-blue-950/40'
-                  : 'bg-emerald-600 hover:bg-emerald-500 shadow-emerald-950/40'
-              }`}
-            >
-              {isInstalling ? (
-                <>
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                  <span>Installing Server...</span>
-                </>
-              ) : (
-                <>
+              {/* Progress Bar */}
+              <div className="w-full bg-slate-950 rounded-full h-2.5 overflow-hidden border border-slate-800 shadow-inner">
+                <div
+                  className={`h-full transition-all duration-200 ${
+                    gameType === 'gmod'
+                      ? 'bg-gradient-to-r from-blue-600 via-blue-500 to-cyan-400'
+                      : 'bg-gradient-to-r from-emerald-600 via-emerald-500 to-teal-400'
+                  }`}
+                  style={{
+                    width: `${Math.min(100, Math.max(typeof installPercent === 'number' ? installPercent : 5, 2))}%`
+                  }}
+                />
+              </div>
+
+              <div className="flex items-center justify-between text-[11px] text-slate-400 font-mono">
+                <span className="truncate">{installDetails || 'Downloading files...'}</span>
+                <span className="shrink-0 text-slate-500 ml-2">
+                  {gameType === 'gmod' ? "Garry's Mod Dedicated Server" : 'Minecraft Java Edition'}
+                </span>
+              </div>
+            </div>
+          ) : (
+            <div className="flex items-center justify-between gap-4">
+              <div className="text-xs text-slate-400 min-w-0">
+                {isDuplicateName && (
+                  <span className="text-rose-400 flex items-center gap-1 font-medium truncate">
+                    <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                    <span>A server with this name already exists</span>
+                  </span>
+                )}
+              </div>
+
+              <div className="flex items-center gap-3 shrink-0">
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className="px-4 py-2 text-xs font-medium text-slate-400 hover:text-white rounded-xl hover:bg-slate-800 transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleCreate}
+                  disabled={!serverPath.trim() || !serverName.trim() || isDuplicateName}
+                  className={`px-5 py-2 text-xs font-semibold text-white disabled:opacity-40 disabled:pointer-events-none rounded-xl transition flex items-center gap-2 shadow-lg ${
+                    gameType === 'gmod'
+                      ? 'bg-blue-600 hover:bg-blue-500 shadow-blue-950/40'
+                      : 'bg-emerald-600 hover:bg-emerald-500 shadow-emerald-950/40'
+                  }`}
+                >
                   <Sparkles className="w-4 h-4" />
                   <span>Build & Create Server</span>
-                </>
-              )}
-            </button>
-          </div>
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>
