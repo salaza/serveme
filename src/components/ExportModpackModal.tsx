@@ -93,15 +93,16 @@ export const ExportModpackModal: React.FC<ExportModpackModalProps> = ({
   const [exportStep, setExportStep] = useState<string>('');
   const [exportResult, setExportResult] = useState<ExportModpackResult | null>(null);
   const [statusMessage, setStatusMessage] = useState<{ text: string; type: 'success' | 'error' | 'info' } | null>(null);
+  const [isResolvingAll, setIsResolvingAll] = useState(false);
 
   // Initialize selected server mods when modal opens
   useEffect(() => {
     if (isOpen) {
-      const enabledFiles = installedMods
-        .filter(m => m.enabled)
+      const enabledFiles = (installedMods || [])
+        .filter(m => m && m.enabled && m.fileName)
         .map(m => m.fileName);
       setSelectedServerMods(new Set(enabledFiles));
-      setPackName(`${server.name} Client Pack`);
+      setPackName(`${server.name || 'Server'} Client Pack`);
       setExportResult(null);
       setStatusMessage(null);
     }
@@ -165,8 +166,6 @@ export const ExportModpackModal: React.FC<ExportModpackModalProps> = ({
       setIsSearchingClient(false);
     }
   };
-
-  const [isResolvingAll, setIsResolvingAll] = useState(false);
 
   // Add a mod from search to client mods list + automatically resolve required dependencies
   const handleAddClientModFromSearch = async (mod: ModItem) => {
@@ -417,9 +416,10 @@ export const ExportModpackModal: React.FC<ExportModpackModalProps> = ({
     }
   };
 
-  const filteredServerMods = installedMods.filter(m =>
-    m.name.toLowerCase().includes(serverModSearch.toLowerCase()) ||
-    m.fileName.toLowerCase().includes(serverModSearch.toLowerCase())
+  const filteredServerMods = (installedMods || []).filter(m =>
+    m &&
+    ((m.name || '').toLowerCase().includes(serverModSearch.toLowerCase()) ||
+     (m.fileName || '').toLowerCase().includes(serverModSearch.toLowerCase()))
   );
 
   const totalSelectedMods = selectedServerMods.size + clientModsToDownload.length + localClientMods.length;
