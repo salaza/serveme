@@ -28,6 +28,78 @@ import {
 let mainWindow: BrowserWindow | null = null;
 const runningProcesses = new Map<string, ChildProcess>();
 
+interface GModSession {
+  port: number;
+  rconPassword: string;
+  childPid: number;
+  logInterval: NodeJS.Timeout;
+}
+const gmodSessions = new Map<string, GModSession>();
+
+function sendSourceRcon(host: string, port: number, password: string, command: string, timeoutMs: number = 4000): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const socket = new net.Socket();
+    const authReqId = 1001;
+    const cmdReqId = 2002;
+    let responseText = '';
+    let timer: NodeJS.Timeout | null = null;
+
+    const cleanup = () => {
+      if (timer) clearTimeout(timer);
+      socket.removeAllListeners();
+      socket.destroy();
+    };
+
+    timer = setTimeout(() => {
+      cleanup();
+      reject(new Error('RCON request timed out'));
+    }, timeoutMs);
+
+    function makePacket(id: number, type: number, body: string): Buffer {
+      const bodyBuf = Buffer.from(body + '\0', 'utf-8');
+      const padBuf = Buffer.from([0]);
+      const size = 4 + 4 + bodyBuf.length + padBuf.length;
+      const header = Buffer.alloc(12);
+      header.writeInt32LE(size, 0);
+      header.writeInt32LE(id, 4);
+      header.writeInt32LE(type, 8);
+      return Buffer.concat([header, bodyBuf, padBuf]);
+    }
+
+    socket.connect(port, host, () => {
+      socket.write(makePacket(authReqId, 3, password));
+    });
+
+    socket.on('data', (data: Buffer) => {
+      if (data.length < 12) return;
+      const id = data.readInt32LE(4);
+      const type = data.readInt32LE(8);
+
+      if (type === 2) {
+        if (id === -1) {
+          cleanup();
+          return reject(new Error('RCON authentication failed: invalid password'));
+        }
+        socket.write(makePacket(cmdReqId, 2, command));
+        return;
+      }
+
+      if (type === 0 && id === cmdReqId) {
+        if (data.length >= 14) {
+          responseText += data.subarray(12, data.length - 2).toString('utf-8');
+        }
+        cleanup();
+        return resolve(responseText);
+      }
+    });
+
+    socket.on('error', (err) => {
+      cleanup();
+      reject(err);
+    });
+  });
+}
+
 // Global exception safety against transient network socket drops
 process.on('uncaughtException', (err: any) => {
   if (err && (err.code === 'ECONNRESET' || err.code === 'EPIPE' || err.code === 'ETIMEDOUT' || err.message?.includes('ECONNRESET'))) {
@@ -447,57 +519,117 @@ ipcMain.handle('server:start', async (_, serverId: string) => {
 
   // Garry's Mod Dedicated Server handling
   if (server.game === 'gmod') {
-    const srcdsPath = path.join(server.path, 'srcds.exe');
-    if (!fs.existsSync(srcdsPath)) {
+    let exeName = 'srcds.exe';
+    if (fs.existsSync(path.join(server.path, 'srcds_win64.exe'))) {
+      exeName = 'srcds_win64.exe';
+    } else if (fs.existsSync(path.join(server.path, 'srcds.exe'))) {
+      exeName = 'srcds.exe';
+    } else {
       return { success: false, error: 'srcds.exe not found in server directory. Please verify server installation.' };
     }
 
     const cfg = server.gmodConfig;
-    const args = [
+    const gmodPort = server.port || 27015;
+    const rconPassword = cfg?.rconPassword?.trim() || `sb_${Math.random().toString(36).slice(2, 10)}`;
+
+    const gmodArgs = [
       '-game', 'garrysmod',
       '-console',
-      '-port', String(server.port || 27015),
+      '-condebug',
+      '-port', String(gmodPort),
+      '+ip', '0.0.0.0',
       '+maxplayers', String(cfg?.maxPlayers || 16),
       '+map', cfg?.defaultMap || 'gm_construct',
       '+gamemode', cfg?.gamemode || 'sandbox',
       '-tickrate', String(cfg?.tickrate || 66),
-      '+hostname', server.name
+      '+hostname', server.name,
+      '+rcon_password', rconPassword
     ];
 
     if (cfg?.workshopCollectionId) {
-      args.push('+host_workshop_collection', cfg.workshopCollectionId.trim());
+      gmodArgs.push('+host_workshop_collection', cfg.workshopCollectionId.trim());
     }
     if (cfg?.steamApiKey) {
-      args.push('-authkey', cfg.steamApiKey.trim());
-    }
-    if (cfg?.rconPassword) {
-      args.push('+rcon_password', cfg.rconPassword.trim());
+      gmodArgs.push('-authkey', cfg.steamApiKey.trim());
     }
     if (cfg?.serverPassword) {
-      args.push('+sv_password', cfg.serverPassword.trim());
+      gmodArgs.push('+sv_password', cfg.serverPassword.trim());
     }
 
     try {
-      const child = spawn(srcdsPath, args, {
+      const logFilePath = path.join(server.path, 'garrysmod', 'console.log');
+      let logOffset = 0;
+      try {
+        if (fs.existsSync(logFilePath)) {
+          fs.writeFileSync(logFilePath, '');
+        }
+      } catch {}
+
+      // Launch srcds in a dedicated console window via cmd.exe start /wait
+      // This provides a valid Win32 console buffer to satisfy CTextConsoleWin32::GetLine
+      const child = spawn('cmd.exe', ['/c', 'start', '/wait', `Garry's Mod Server - ${server.name}`, exeName, ...gmodArgs], {
         cwd: server.path,
-        shell: false
+        windowsHide: false
+      });
+
+      const logInterval = setInterval(() => {
+        try {
+          if (!fs.existsSync(logFilePath)) return;
+          const stat = fs.statSync(logFilePath);
+          if (stat.size > logOffset) {
+            const fd = fs.openSync(logFilePath, 'r');
+            const bytesToRead = stat.size - logOffset;
+            const buffer = Buffer.alloc(bytesToRead);
+            fs.readSync(fd, buffer, 0, bytesToRead, logOffset);
+            fs.closeSync(fd);
+            logOffset = stat.size;
+
+            const text = buffer.toString('utf-8');
+            if (text) {
+              mainWindow?.webContents.send('server:log', { serverId, log: text, type: 'stdout' });
+            }
+          }
+        } catch {}
+      }, 250);
+
+      gmodSessions.set(serverId, {
+        port: gmodPort,
+        rconPassword,
+        childPid: child.pid!,
+        logInterval
       });
 
       runningProcesses.set(serverId, child);
       mainWindow?.webContents.send('server:status', { serverId, status: 'running' });
-
-      child.stdout.on('data', (data) => {
-        const text = data.toString();
-        mainWindow?.webContents.send('server:log', { serverId, log: text, type: 'stdout' });
-      });
-
-      child.stderr.on('data', (data) => {
-        const text = data.toString();
-        mainWindow?.webContents.send('server:log', { serverId, log: text, type: 'stderr' });
+      mainWindow?.webContents.send('server:log', {
+        serverId,
+        log: `[System] Garry's Mod dedicated server launched (${exeName} on port ${gmodPort})\n`,
+        type: 'system'
       });
 
       child.on('close', (code) => {
+        clearInterval(logInterval);
+        gmodSessions.delete(serverId);
         runningProcesses.delete(serverId);
+
+        // Read any remaining lines
+        try {
+          if (fs.existsSync(logFilePath)) {
+            const stat = fs.statSync(logFilePath);
+            if (stat.size > logOffset) {
+              const fd = fs.openSync(logFilePath, 'r');
+              const bytesToRead = stat.size - logOffset;
+              const buffer = Buffer.alloc(bytesToRead);
+              fs.readSync(fd, buffer, 0, bytesToRead, logOffset);
+              fs.closeSync(fd);
+              const text = buffer.toString('utf-8');
+              if (text) {
+                mainWindow?.webContents.send('server:log', { serverId, log: text, type: 'stdout' });
+              }
+            }
+          }
+        } catch {}
+
         mainWindow?.webContents.send('server:status', { serverId, status: 'stopped' });
         mainWindow?.webContents.send('server:log', {
           serverId,
@@ -507,6 +639,8 @@ ipcMain.handle('server:start', async (_, serverId: string) => {
       });
 
       child.on('error', (err) => {
+        clearInterval(logInterval);
+        gmodSessions.delete(serverId);
         runningProcesses.delete(serverId);
         mainWindow?.webContents.send('server:status', { serverId, status: 'stopped' });
         mainWindow?.webContents.send('server:log', {
@@ -607,11 +741,25 @@ ipcMain.handle('server:stop', async (_, serverId: string) => {
 
   mainWindow?.webContents.send('server:status', { serverId, status: 'stopping' });
   
-  if (server?.game === 'gmod') {
-    child.stdin?.write('quit\n');
-  } else {
-    child.stdin?.write('stop\n');
+  const gmodSession = gmodSessions.get(serverId);
+  if (gmodSession) {
+    // Attempt graceful quit via RCON
+    sendSourceRcon('127.0.0.1', gmodSession.port, gmodSession.rconPassword, 'quit').catch(() => {});
+
+    // Safety fallback: terminate process tree if not closed after 3 seconds
+    setTimeout(() => {
+      if (runningProcesses.has(serverId)) {
+        try {
+          execSync(`taskkill /F /T /PID ${child.pid}`, { stdio: 'ignore' });
+        } catch {}
+      }
+    }, 3000);
+
+    return { success: true };
   }
+
+  // Minecraft graceful stop
+  child.stdin?.write('stop\n');
 
   // Safety fallback after 12 seconds
   setTimeout(() => {
@@ -629,6 +777,32 @@ ipcMain.handle('server:stop', async (_, serverId: string) => {
 });
 
 ipcMain.handle('server:command', async (_, { serverId, command }: { serverId: string; command: string }) => {
+  const gmodSession = gmodSessions.get(serverId);
+  if (gmodSession) {
+    mainWindow?.webContents.send('server:log', {
+      serverId,
+      log: `> ${command}\n`,
+      type: 'system'
+    });
+    try {
+      const response = await sendSourceRcon('127.0.0.1', gmodSession.port, gmodSession.rconPassword, command);
+      if (response && response.trim()) {
+        mainWindow?.webContents.send('server:log', {
+          serverId,
+          log: response.trim() + '\n',
+          type: 'stdout'
+        });
+      }
+    } catch (err: any) {
+      mainWindow?.webContents.send('server:log', {
+        serverId,
+        log: `[RCON] ${err.message || 'Command executed'}\n`,
+        type: 'system'
+      });
+    }
+    return { success: true };
+  }
+
   const child = runningProcesses.get(serverId);
   if (child && child.stdin) {
     child.stdin.write(command + '\n');
@@ -638,6 +812,7 @@ ipcMain.handle('server:command', async (_, { serverId, command }: { serverId: st
       type: 'system'
     });
   }
+  return { success: true };
 });
 
 // Mod management
@@ -2062,6 +2237,10 @@ ipcMain.handle('gmod:setup', async (_, options: CreateGModServerOptions) => {
       ].join('\n');
       fs.writeFileSync(serverCfgPath, defaultCfg, 'utf-8');
     }
+
+    // Create start.bat for Windows
+    const batContent = `@echo off\r\ntitle Garry's Mod Dedicated Server - ${server.name}\r\nsrcds.exe -game garrysmod -console -port ${server.port || 27015} +maxplayers ${maxPlayers || 16} +map ${defaultMap || 'gm_construct'} +gamemode ${gamemode || 'sandbox'} -tickrate ${tickrate || 66} +hostname "${server.name}"\r\npause\r\n`;
+    fs.writeFileSync(path.join(server.path, 'start.bat'), batContent, 'utf-8');
 
     // Save server instance
     const gmodServer: ServerInstance = {
