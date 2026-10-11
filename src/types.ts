@@ -161,6 +161,7 @@ export interface ClientModToDownload {
   fileSize?: number;
   iconUrl?: string;
   provider: 'modrinth' | 'curseforge';
+  requiredBy?: string;
 }
 
 export interface LocalClientMod {

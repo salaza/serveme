@@ -8,7 +8,11 @@ import {
   ModItem,
   ExportModpackResult
 } from '../types';
-import { searchModrinth, getModrinthProjectVersions } from '../services/mod-providers/modrinth';
+import {
+  searchModrinth,
+  getModrinthProjectVersions,
+  resolveModDependencies
+} from '../services/mod-providers/modrinth';
 import {
   Package,
   X,
@@ -162,7 +166,9 @@ export const ExportModpackModal: React.FC<ExportModpackModalProps> = ({
     }
   };
 
-  // Add a mod from search to client mods list
+  const [isResolvingAll, setIsResolvingAll] = useState(false);
+
+  // Add a mod from search to client mods list + automatically resolve required dependencies
   const handleAddClientModFromSearch = async (mod: ModItem) => {
     setResolvingModId(mod.id);
     try {
@@ -200,12 +206,114 @@ export const ExportModpackModal: React.FC<ExportModpackModalProps> = ({
         provider: 'modrinth'
       };
 
-      setClientModsToDownload(prev => [...prev, newClientMod]);
-      setStatusMessage({ text: `Added ${mod.name} to client mods!`, type: 'success' });
+      // Set up known included items to avoid duplicate downloads
+      const alreadyIncluded = new Set<string>();
+      selectedServerMods.forEach(f => {
+        alreadyIncluded.add(f.toLowerCase());
+        const stripped = f.replace(/\.jar(\.disabled)?$/, '').toLowerCase();
+        alreadyIncluded.add(stripped);
+      });
+      clientModsToDownload.forEach(m => {
+        alreadyIncluded.add(m.id.toLowerCase());
+        alreadyIncluded.add(m.fileName.toLowerCase());
+      });
+      localClientMods.forEach(m => {
+        alreadyIncluded.add(m.fileName.toLowerCase());
+      });
+      alreadyIncluded.add(mod.id.toLowerCase());
+      alreadyIncluded.add(primaryFile.filename.toLowerCase());
+
+      // Recursively resolve required dependencies (e.g. Searchables for Controlling, Sodium for Iris, etc.)
+      setStatusMessage({ text: `Checking required dependencies for ${mod.name}...`, type: 'info' });
+      const dependencies = await resolveModDependencies(
+        latestVer,
+        mod.name,
+        server.version,
+        server.loader,
+        alreadyIncluded
+      );
+
+      setClientModsToDownload(prev => {
+        const existingFileNames = new Set(prev.map(m => m.fileName.toLowerCase()));
+        const toAdd = [newClientMod, ...dependencies].filter(m => !existingFileNames.has(m.fileName.toLowerCase()));
+        return [...prev, ...toAdd];
+      });
+
+      if (dependencies.length > 0) {
+        setStatusMessage({
+          text: `Added ${mod.name} + ${dependencies.length} required dependency: ${dependencies.map(d => d.name).join(', ')}`,
+          type: 'success'
+        });
+      } else {
+        setStatusMessage({ text: `Added ${mod.name} to client mods!`, type: 'success' });
+      }
     } catch (err: any) {
       setStatusMessage({ text: `Failed to resolve mod file: ${err.message}`, type: 'error' });
     } finally {
       setResolvingModId(null);
+    }
+  };
+
+  // Scan & auto-resolve dependencies for all currently selected client mods
+  const handleResolveAllDependencies = async () => {
+    if (clientModsToDownload.length === 0) {
+      setStatusMessage({ text: 'No client mods added yet.', type: 'info' });
+      return;
+    }
+
+    setIsResolvingAll(true);
+    setStatusMessage({ text: 'Scanning and resolving missing dependencies for all client mods...', type: 'info' });
+
+    try {
+      const alreadyIncluded = new Set<string>();
+      selectedServerMods.forEach(f => {
+        alreadyIncluded.add(f.toLowerCase());
+        const stripped = f.replace(/\.jar(\.disabled)?$/, '').toLowerCase();
+        alreadyIncluded.add(stripped);
+      });
+      clientModsToDownload.forEach(m => {
+        alreadyIncluded.add(m.id.toLowerCase());
+        alreadyIncluded.add(m.fileName.toLowerCase());
+      });
+      localClientMods.forEach(m => {
+        alreadyIncluded.add(m.fileName.toLowerCase());
+      });
+
+      const newDependencies: ClientModToDownload[] = [];
+
+      for (const mod of clientModsToDownload) {
+        try {
+          const versions = await getModrinthProjectVersions(mod.id, server.version, server.loader);
+          if (versions.length > 0) {
+            const deps = await resolveModDependencies(
+              versions[0],
+              mod.name,
+              server.version,
+              server.loader,
+              alreadyIncluded
+            );
+            newDependencies.push(...deps);
+          }
+        } catch {}
+      }
+
+      if (newDependencies.length > 0) {
+        setClientModsToDownload(prev => {
+          const existingFileNames = new Set(prev.map(m => m.fileName.toLowerCase()));
+          const toAdd = newDependencies.filter(m => !existingFileNames.has(m.fileName.toLowerCase()));
+          return [...prev, ...toAdd];
+        });
+        setStatusMessage({
+          text: `Successfully resolved ${newDependencies.length} missing dependencies: ${newDependencies.map(d => d.name).join(', ')}`,
+          type: 'success'
+        });
+      } else {
+        setStatusMessage({ text: 'All client mod dependencies are satisfied!', type: 'success' });
+      }
+    } catch (err: any) {
+      setStatusMessage({ text: `Failed to resolve dependencies: ${err.message}`, type: 'error' });
+    } finally {
+      setIsResolvingAll(false);
     }
   };
 
@@ -246,6 +354,46 @@ export const ExportModpackModal: React.FC<ExportModpackModalProps> = ({
     if (!chosenPath) return;
 
     setIsExporting(true);
+    setExportStep('Verifying & resolving mod dependencies...');
+
+    // Auto-resolve any remaining dependencies before packaging
+    let finalClientMods = [...clientModsToDownload];
+    try {
+      const alreadyIncluded = new Set<string>();
+      selectedServerMods.forEach(f => {
+        alreadyIncluded.add(f.toLowerCase());
+        const stripped = f.replace(/\.jar(\.disabled)?$/, '').toLowerCase();
+        alreadyIncluded.add(stripped);
+      });
+      finalClientMods.forEach(m => {
+        alreadyIncluded.add(m.id.toLowerCase());
+        alreadyIncluded.add(m.fileName.toLowerCase());
+      });
+      localClientMods.forEach(m => {
+        alreadyIncluded.add(m.fileName.toLowerCase());
+      });
+
+      for (const mod of clientModsToDownload) {
+        try {
+          const versions = await getModrinthProjectVersions(mod.id, server.version, server.loader);
+          if (versions.length > 0) {
+            const deps = await resolveModDependencies(
+              versions[0],
+              mod.name,
+              server.version,
+              server.loader,
+              alreadyIncluded
+            );
+            if (deps.length > 0) {
+              finalClientMods.push(...deps);
+            }
+          }
+        } catch {}
+      }
+    } catch (depErr) {
+      console.warn('Pre-export dependency check notice:', depErr);
+    }
+
     setExportStep('Preparing files and configs...');
 
     try {
@@ -256,7 +404,7 @@ export const ExportModpackModal: React.FC<ExportModpackModalProps> = ({
         packNotes: packNotes.trim(),
         includeConfigs,
         selectedServerModFiles: Array.from(selectedServerMods),
-        clientModsToDownload,
+        clientModsToDownload: finalClientMods,
         localClientModPaths: localClientMods.map(m => m.path),
         outputPath: chosenPath
       });
@@ -779,6 +927,23 @@ export const ExportModpackModal: React.FC<ExportModpackModalProps> = ({
                     <Zap className="w-3.5 h-3.5 text-amber-400" />
                     <span>Selected Client Mods ({clientModsToDownload.length + localClientMods.length})</span>
                   </span>
+
+                  {clientModsToDownload.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={handleResolveAllDependencies}
+                      disabled={isResolvingAll}
+                      className="px-2.5 py-1 text-[11px] font-medium bg-slate-800 hover:bg-slate-700 text-amber-300 rounded-lg border border-slate-700 flex items-center gap-1.5 transition disabled:opacity-50"
+                      title="Scan and auto-resolve any missing dependencies"
+                    >
+                      {isResolvingAll ? (
+                        <Loader2 className="w-3 h-3 animate-spin text-amber-400" />
+                      ) : (
+                        <Sparkles className="w-3 h-3 text-amber-400" />
+                      )}
+                      <span>Auto-Resolve Dependencies</span>
+                    </button>
+                  )}
                 </div>
 
                 {clientModsToDownload.length === 0 && localClientMods.length === 0 ? (
@@ -804,6 +969,11 @@ export const ExportModpackModal: React.FC<ExportModpackModalProps> = ({
                               <span className="px-1.5 py-0.2 rounded text-[9px] font-mono bg-blue-500/15 text-blue-400 border border-blue-500/25">
                                 Modrinth
                               </span>
+                              {mod.requiredBy && (
+                                <span className="px-1.5 py-0.2 rounded text-[9px] font-medium bg-amber-500/15 text-amber-300 border border-amber-500/25">
+                                  Required by {mod.requiredBy}
+                                </span>
+                              )}
                             </div>
                             <div className="text-[11px] font-mono text-slate-500 truncate">{mod.fileName}</div>
                           </div>

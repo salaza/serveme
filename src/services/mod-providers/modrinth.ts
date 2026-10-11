@@ -1,4 +1,4 @@
-import { ModItem, MinecraftLoader } from '../../types';
+import { ModItem, MinecraftLoader, ClientModToDownload } from '../../types';
 
 export interface ModrinthSearchResult {
   hits: Array<{
@@ -169,3 +169,131 @@ export async function getModrinthProject(projectIdOrSlug: string): Promise<any> 
   if (!response.ok) throw new Error(`Project ${projectIdOrSlug} not found`);
   return response.json();
 }
+
+export async function getModrinthVersion(versionId: string): Promise<ModrinthVersion> {
+  const url = `https://api.modrinth.com/v2/version/${versionId}`;
+  const response = await fetch(url, {
+    headers: {
+      'User-Agent': 'GameServerBuilder/1.0.0'
+    }
+  });
+  if (!response.ok) throw new Error(`Version ${versionId} not found`);
+  return response.json();
+}
+
+/**
+ * Recursively resolves all required dependencies for a Modrinth version
+ */
+export async function resolveModDependencies(
+  version: ModrinthVersion,
+  parentModName: string,
+  gameVersion?: string,
+  loader?: MinecraftLoader,
+  alreadyIncluded: Set<string> = new Set(),
+  visitedVersions: Set<string> = new Set()
+): Promise<ClientModToDownload[]> {
+  const resolvedDeps: ClientModToDownload[] = [];
+
+  if (!version.dependencies || version.dependencies.length === 0) {
+    return resolvedDeps;
+  }
+
+  if (visitedVersions.has(version.id)) {
+    return resolvedDeps;
+  }
+  visitedVersions.add(version.id);
+
+  const requiredDeps = version.dependencies.filter(d => d.dependency_type === 'required');
+  if (requiredDeps.length === 0) return resolvedDeps;
+
+  for (const dep of requiredDeps) {
+    let depVersion: ModrinthVersion | null = null;
+    let projectId = dep.project_id;
+
+    // 1. If specific version_id is pinned
+    if (dep.version_id) {
+      try {
+        depVersion = await getModrinthVersion(dep.version_id);
+        if (depVersion) {
+          projectId = depVersion.project_id;
+        }
+      } catch (err) {
+        console.warn('Could not fetch version by version_id:', dep.version_id, err);
+      }
+    }
+
+    // 2. If project_id is provided and we still need the compatible version
+    if (!depVersion && projectId) {
+      if (alreadyIncluded.has(projectId.toLowerCase())) {
+        continue;
+      }
+
+      try {
+        const versions = await getModrinthProjectVersions(projectId, gameVersion, loader);
+        if (versions.length > 0) {
+          depVersion = versions[0];
+        }
+      } catch (err) {
+        console.warn('Could not fetch versions for dependency project:', projectId, err);
+      }
+    }
+
+    if (!depVersion || !depVersion.files || depVersion.files.length === 0) {
+      continue;
+    }
+
+    const primaryFile = depVersion.files.find(f => f.primary) || depVersion.files[0];
+    if (!primaryFile) continue;
+
+    const cleanFileName = primaryFile.filename.toLowerCase();
+    if (alreadyIncluded.has(cleanFileName) || (projectId && alreadyIncluded.has(projectId.toLowerCase()))) {
+      continue;
+    }
+
+    // Fetch project title and icon
+    let projectTitle = depVersion.name;
+    let iconUrl: string | undefined = undefined;
+    if (projectId) {
+      try {
+        const proj = await getModrinthProject(projectId);
+        if (proj) {
+          projectTitle = proj.title || projectTitle;
+          iconUrl = proj.icon_url;
+          if (proj.slug) {
+            alreadyIncluded.add(proj.slug.toLowerCase());
+          }
+        }
+      } catch {}
+    }
+
+    alreadyIncluded.add(cleanFileName);
+    if (projectId) alreadyIncluded.add(projectId.toLowerCase());
+
+    const clientMod: ClientModToDownload = {
+      id: projectId || depVersion.id,
+      name: projectTitle,
+      fileName: primaryFile.filename,
+      downloadUrl: primaryFile.url,
+      fileSize: primaryFile.size,
+      iconUrl,
+      provider: 'modrinth',
+      requiredBy: parentModName
+    };
+
+    resolvedDeps.push(clientMod);
+
+    // Recursively resolve dependencies of this dependency
+    const transitive = await resolveModDependencies(
+      depVersion,
+      projectTitle,
+      gameVersion,
+      loader,
+      alreadyIncluded,
+      visitedVersions
+    );
+    resolvedDeps.push(...transitive);
+  }
+
+  return resolvedDeps;
+}
+
