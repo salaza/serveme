@@ -1,7 +1,7 @@
 {
-  "name": "game-server-builder",
+  "name": "serveme",
   "version": "1.0.0",
-  "description": "Dedicated Game Server Builder & Manager with Mod and Config Support",
+  "description": "ServeMe - Dedicated Game Server Builder & Manager",
   "main": "dist-electron/electron/main.js",
   "scripts": {
     "dev": "concurrently -k \"vite\" \"wait-on tcp:5173 && cross-env NODE_ENV=development electron .\"",
@@ -14,8 +14,8 @@
     "preview": "vite preview"
   },
   "build": {
-    "appId": "com.gameserverbuilder.app",
-    "productName": "Game Server Builder",
+    "appId": "com.serveme.app",
+    "productName": "ServeMe",
     "directories": {
       "output": "release"
     },

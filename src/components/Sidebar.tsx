@@ -27,7 +27,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </div>
           <div>
             <h1 className="font-bold text-sm tracking-wide text-slate-100 flex items-center gap-1.5">
-              SERVER <span className="text-emerald-400 font-extrabold">BUILDER</span>
+              SERVE<span className="text-emerald-400 font-extrabold">ME</span>
             </h1>
             <span className="text-[10px] text-slate-400 block font-mono">Dedicated Server Hub</span>
           </div>

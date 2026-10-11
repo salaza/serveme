@@ -1,4 +1,4 @@
-# Game Server Builder
+# ServeMe
 
 A desktop application for creating, configuring, and managing dedicated game servers for Minecraft and Garry's Mod.
 

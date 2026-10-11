@@ -469,7 +469,7 @@ export const CreateServerModal: React.FC<CreateServerModalProps> = ({
                 <div>
                   <p className="font-semibold text-blue-200">Automated SteamCMD Setup</p>
                   <p className="text-blue-300/80 mt-0.5 text-[11px]">
-                    Game Server Builder will automatically bootstrap SteamCMD and download official Garry&apos;s Mod dedicated server files (App ID 4020) anonymously.
+                    ServeMe will automatically bootstrap SteamCMD and download official Garry&apos;s Mod dedicated server files (App ID 4020) anonymously.
                   </p>
                 </div>
               </div>
