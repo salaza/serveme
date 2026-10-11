@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { ServerInstance, PortCheckResult, JavaVersionInfo } from '../types';
 import {
   Sliders,
@@ -27,7 +27,8 @@ import {
   Package,
   Wrench,
   Check,
-  X
+  X,
+  Dices
 } from 'lucide-react';
 import { PortWarningModal } from './PortWarningModal';
 import { getRequiredJavaVersion } from '../services/minecraft-meta';
@@ -44,6 +45,42 @@ import {
 interface ConfigTabProps {
   server: ServerInstance;
   onServerUpdated: (server: ServerInstance) => void;
+}
+
+// Word lists for readable seed generation
+const SEED_ADJECTIVES = [
+  'ancient', 'cosmic', 'crimson', 'emerald', 'frozen', 'golden', 'hidden', 'mystic',
+  'silent', 'whispering', 'shadow', 'celestial', 'crystal', 'wild', 'infinite', 'radiant',
+  'dark', 'abyssal', 'stormy', 'verdant', 'blazing', 'lunar', 'obsidian', 'spectral',
+  'astral', 'shimmering', 'echoing', 'primal', 'mythic', 'velvet', 'iron', 'silver'
+];
+
+const SEED_NOUNS = [
+  'valley', 'peak', 'canyon', 'forest', 'ocean', 'spire', 'glade', 'tundra',
+  'cavern', 'realm', 'citadel', 'sanctuary', 'badlands', 'archipelago', 'jungle',
+  'bastion', 'summit', 'oasis', 'crater', 'highland', 'haven', 'horizon', 'delta', 'meadow'
+];
+
+const SEED_CREATURES = [
+  'dragon', 'phoenix', 'wolf', 'titan', 'voyager', 'aurora', 'ember',
+  'tempest', 'blossom', 'monolith', 'beacon', 'echo', 'wanderer', 'keeper', 'sentinel'
+];
+
+function generateRandomNumericSeed(): string {
+  const high = BigInt(Math.floor(Math.random() * 0xffffffff));
+  const low = BigInt(Math.floor(Math.random() * 0xffffffff));
+  const sign = Math.random() < 0.5 ? -1n : 1n;
+  const raw = ((high << 32n) | low) % 9223372036854775807n;
+  return (raw * sign).toString();
+}
+
+function generateRandomWordSeed(): string {
+  const adj = SEED_ADJECTIVES[Math.floor(Math.random() * SEED_ADJECTIVES.length)];
+  const mid = (Math.random() < 0.5 ? SEED_ADJECTIVES : SEED_CREATURES)[
+    Math.floor(Math.random() * (Math.random() < 0.5 ? SEED_ADJECTIVES.length : SEED_CREATURES.length))
+  ];
+  const noun = SEED_NOUNS[Math.floor(Math.random() * SEED_NOUNS.length)];
+  return `${adj}-${mid}-${noun}`;
 }
 
 export const ConfigTab: React.FC<ConfigTabProps> = ({ server, onServerUpdated }) => {
@@ -64,8 +101,12 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({ server, onServerUpdated })
   const [jvmArgs, setJvmArgs] = useState(server.jvmArgs || '');
   const [javaPath, setJavaPath] = useState(server.javaPath || 'java');
   const [detectedJavas, setDetectedJavas] = useState<JavaVersionInfo[]>([]);
-  const [savedSuccess, setSavedSuccess] = useState(false);
-  const [isSaving, setIsSaving] = useState(false);
+
+  // Auto-save state
+  const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
+  const isLoadedRef = useRef(false);
+  const saveDebounceTimer = useRef<NodeJS.Timeout | null>(null);
+  const rawSaveDebounceTimer = useRef<NodeJS.Timeout | null>(null);
 
   // Port test state
   const [isTestingPort, setIsTestingPort] = useState(false);
@@ -73,8 +114,13 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({ server, onServerUpdated })
   const [isPortModalOpen, setIsPortModalOpen] = useState(false);
   const [portTestSuccess, setPortTestSuccess] = useState<boolean | null>(null);
 
+  // Load properties on mount
   useEffect(() => {
-    loadProperties();
+    isLoadedRef.current = false;
+    loadProperties().then(() => {
+      isLoadedRef.current = true;
+    });
+
     window.electronAPI.detectJava().then((list) => {
       setDetectedJavas(list);
     });
@@ -89,6 +135,109 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({ server, onServerUpdated })
     const raw = await window.electronAPI.readRawFile(`${server.path}${sep}server.properties`);
     setRawText(raw);
   };
+
+  // Perform actual save to disk
+  const persistChanges = useCallback(
+    async (
+      currentProperties: Record<string, string>,
+      currentRamMin: number,
+      currentRamMax: number,
+      currentJvmArgs: string,
+      currentJavaPath: string
+    ) => {
+      setSaveStatus('saving');
+      try {
+        await window.electronAPI.saveServerProperties(server.path, currentProperties);
+
+        // Update rawText cache
+        const sep = window.navigator.userAgent.includes('Windows') ? '\\' : '/';
+        const raw = await window.electronAPI.readRawFile(`${server.path}${sep}server.properties`);
+        setRawText(raw);
+
+        // Synchronize port if changed
+        let finalPort = server.port;
+        if (currentProperties['server-port']) {
+          const parsed = parseInt(currentProperties['server-port'], 10);
+          if (!isNaN(parsed) && parsed > 0) {
+            finalPort = parsed;
+          }
+        }
+
+        const updatedServer: ServerInstance = {
+          ...server,
+          port: finalPort,
+          ramMin: currentRamMin,
+          ramMax: currentRamMax,
+          jvmArgs: currentJvmArgs,
+          javaPath: currentJavaPath
+        };
+
+        await window.electronAPI.saveServer(updatedServer);
+        onServerUpdated(updatedServer);
+
+        setSaveStatus('saved');
+        setTimeout(() => {
+          setSaveStatus((prev) => (prev === 'saved' ? 'idle' : prev));
+        }, 2200);
+      } catch (err) {
+        console.error('Failed to auto-save properties:', err);
+        setSaveStatus('idle');
+      }
+    },
+    [server, onServerUpdated]
+  );
+
+  // Auto-save debounce effect for visual and JVM settings
+  useEffect(() => {
+    if (!isLoadedRef.current) return;
+
+    if (saveDebounceTimer.current) {
+      clearTimeout(saveDebounceTimer.current);
+    }
+
+    setSaveStatus('saving');
+    saveDebounceTimer.current = setTimeout(() => {
+      persistChanges(properties, ramMin, ramMax, jvmArgs, javaPath);
+    }, 600);
+
+    return () => {
+      if (saveDebounceTimer.current) {
+        clearTimeout(saveDebounceTimer.current);
+      }
+    };
+  }, [properties, ramMin, ramMax, jvmArgs, javaPath, persistChanges]);
+
+  // Auto-save effect for raw text subtab
+  useEffect(() => {
+    if (!isLoadedRef.current || activeSubTab !== 'raw') return;
+
+    if (rawSaveDebounceTimer.current) {
+      clearTimeout(rawSaveDebounceTimer.current);
+    }
+
+    setSaveStatus('saving');
+    rawSaveDebounceTimer.current = setTimeout(async () => {
+      try {
+        const sep = window.navigator.userAgent.includes('Windows') ? '\\' : '/';
+        await window.electronAPI.writeRawFile(`${server.path}${sep}server.properties`, rawText);
+        const props = await window.electronAPI.readServerProperties(server.path);
+        setProperties(props);
+        setSaveStatus('saved');
+        setTimeout(() => {
+          setSaveStatus((prev) => (prev === 'saved' ? 'idle' : prev));
+        }, 2200);
+      } catch (err) {
+        console.error('Failed to auto-save raw config:', err);
+        setSaveStatus('idle');
+      }
+    }, 800);
+
+    return () => {
+      if (rawSaveDebounceTimer.current) {
+        clearTimeout(rawSaveDebounceTimer.current);
+      }
+    };
+  }, [rawText, activeSubTab, server.path]);
 
   const updateProp = (key: string, value: string) => {
     setProperties((prev) => ({ ...prev, [key]: value }));
@@ -118,45 +267,15 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({ server, onServerUpdated })
     setJvmArgs(aikar);
   };
 
-  const handleSave = async () => {
-    setIsSaving(true);
-    try {
-      if (activeSubTab === 'raw') {
-        const sep = window.navigator.userAgent.includes('Windows') ? '\\' : '/';
-        await window.electronAPI.writeRawFile(`${server.path}${sep}server.properties`, rawText);
-        await loadProperties();
-      } else {
-        await window.electronAPI.saveServerProperties(server.path, properties);
-      }
-
-      // Synchronize port if changed in server.properties
-      let finalPort = server.port;
-      if (properties['server-port']) {
-        const parsed = parseInt(properties['server-port'], 10);
-        if (!isNaN(parsed) && parsed > 0) {
-          finalPort = parsed;
-        }
-      }
-
-      // Update server instance settings (RAM, JVM args, synchronized port)
-      const updatedServer: ServerInstance = {
-        ...server,
-        port: finalPort,
-        ramMin,
-        ramMax,
-        jvmArgs,
-        javaPath
-      };
-
-      await window.electronAPI.saveServer(updatedServer);
-      onServerUpdated(updatedServer);
-
-      setSavedSuccess(true);
-      setTimeout(() => setSavedSuccess(false), 2500);
-    } catch (err) {
-      console.error('Failed to save config:', err);
-    } finally {
-      setIsSaving(false);
+  const handleManualSave = async () => {
+    if (activeSubTab === 'raw') {
+      const sep = window.navigator.userAgent.includes('Windows') ? '\\' : '/';
+      await window.electronAPI.writeRawFile(`${server.path}${sep}server.properties`, rawText);
+      await loadProperties();
+      setSaveStatus('saved');
+      setTimeout(() => setSaveStatus('idle'), 2000);
+    } else {
+      await persistChanges(properties, ramMin, ramMax, jvmArgs, javaPath);
     }
   };
 
@@ -295,20 +414,37 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({ server, onServerUpdated })
           </button>
         </div>
 
-        <div className="flex items-center gap-2">
-          {savedSuccess && (
-            <div className="flex items-center gap-1.5 text-xs text-emerald-400 font-medium animate-in fade-in">
-              <CheckCircle2 className="w-4 h-4" />
-              <span>Saved!</span>
+        {/* Auto-save Status & Controls */}
+        <div className="flex items-center gap-3">
+          {saveStatus === 'saving' && (
+            <div className="flex items-center gap-1.5 text-xs text-amber-400 font-medium animate-pulse">
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              <span>Saving changes...</span>
             </div>
           )}
+
+          {saveStatus === 'saved' && (
+            <div className="flex items-center gap-1.5 text-xs text-emerald-400 font-medium animate-in fade-in">
+              <CheckCircle2 className="w-4 h-4" />
+              <span>All changes saved</span>
+            </div>
+          )}
+
+          {saveStatus === 'idle' && (
+            <div className="flex items-center gap-1 text-[11px] text-slate-500 font-medium">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500/80 inline-block" />
+              <span>Auto-save active</span>
+            </div>
+          )}
+
           <button
-            onClick={handleSave}
-            disabled={isSaving}
-            className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 transition shadow-sm disabled:opacity-50"
+            onClick={handleManualSave}
+            disabled={saveStatus === 'saving'}
+            className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 rounded-lg text-xs font-medium flex items-center gap-1.5 transition disabled:opacity-50"
+            title="Force immediate save"
           >
-            <Save className="w-3.5 h-3.5" />
-            <span>{isSaving ? 'Saving...' : 'Save Changes'}</span>
+            <Save className="w-3.5 h-3.5 text-emerald-400" />
+            <span>Save Now</span>
           </button>
         </div>
       </div>
@@ -582,7 +718,59 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({ server, onServerUpdated })
                           </div>
                         )}
 
-                        {prop.type === 'string' && (
+                        {/* Special Custom UI for World Seed with Randomize Generators */}
+                        {prop.type === 'string' && prop.key === 'level-seed' && (
+                          <div className="space-y-2">
+                            <div className="flex items-center gap-1.5">
+                              <input
+                                type="text"
+                                value={currentValue}
+                                onChange={(e) => updateProp(prop.key, e.target.value)}
+                                placeholder="Random seed (leave empty for random world)"
+                                className="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-white font-mono focus:outline-none focus:border-emerald-500"
+                              />
+                              {currentValue && (
+                                <button
+                                  type="button"
+                                  onClick={() => updateProp(prop.key, '')}
+                                  className="p-1.5 text-slate-500 hover:text-slate-300 hover:bg-slate-800 rounded-lg transition"
+                                  title="Clear seed"
+                                >
+                                  <X className="w-3.5 h-3.5" />
+                                </button>
+                              )}
+                            </div>
+
+                            {/* Randomize Action Buttons */}
+                            <div className="flex items-center gap-2 pt-0.5">
+                              <span className="text-[10px] text-slate-500 font-semibold uppercase tracking-wider">
+                                Randomize:
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => updateProp(prop.key, generateRandomWordSeed())}
+                                className="px-2.5 py-1 bg-slate-800/90 hover:bg-slate-750 hover:border-emerald-500/50 text-slate-200 border border-slate-700/80 rounded-md text-[11px] font-medium flex items-center gap-1.5 transition shadow-sm active:scale-95"
+                                title="Generate readable multi-word seed"
+                              >
+                                <Sparkles className="w-3 h-3 text-emerald-400" />
+                                <span>Word Chain</span>
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={() => updateProp(prop.key, generateRandomNumericSeed())}
+                                className="px-2.5 py-1 bg-slate-800/90 hover:bg-slate-750 hover:border-cyan-500/50 text-slate-200 border border-slate-700/80 rounded-md text-[11px] font-medium flex items-center gap-1.5 transition shadow-sm active:scale-95"
+                                title="Generate 64-bit random number seed"
+                              >
+                                <Dices className="w-3 h-3 text-cyan-400" />
+                                <span>Number Seed</span>
+                              </button>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Standard String Input */}
+                        {prop.type === 'string' && prop.key !== 'level-seed' && (
                           <input
                             type="text"
                             value={currentValue}
@@ -679,7 +867,7 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({ server, onServerUpdated })
                   min="1"
                   max="16"
                   value={ramMin}
-                  onChange={(e) => setRamMin(parseInt(e.target.value))}
+                  onChange={(e) => setRamMin(parseInt(e.target.value, 10))}
                   className="w-full accent-emerald-500 cursor-pointer"
                 />
               </div>
@@ -694,7 +882,7 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({ server, onServerUpdated })
                   min="1"
                   max="32"
                   value={ramMax}
-                  onChange={(e) => setRamMax(parseInt(e.target.value))}
+                  onChange={(e) => setRamMax(parseInt(e.target.value, 10))}
                   className="w-full accent-emerald-500 cursor-pointer"
                 />
               </div>
@@ -777,7 +965,7 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({ server, onServerUpdated })
         <div className="flex-1 flex flex-col min-h-0 bg-slate-950/60 border border-slate-800/80 rounded-xl p-4">
           <div className="flex items-center justify-between mb-2">
             <span className="text-xs font-mono text-slate-400">Direct server.properties editor</span>
-            <span className="text-[11px] text-slate-500">Changes will reload into visual editor upon save</span>
+            <span className="text-[11px] text-slate-500">Changes are automatically saved to disk</span>
           </div>
           <textarea
             value={rawText}
