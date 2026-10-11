@@ -134,28 +134,45 @@ async function ensureSteamCMD(onStatus?: (stage: string, percent?: number) => vo
   const steamcmdDir = path.join(userDataPath, 'steamcmd');
   const steamcmdExe = path.join(steamcmdDir, 'steamcmd.exe');
 
-  if (fs.existsSync(steamcmdExe)) {
-    return steamcmdExe;
-  }
-
-  if (!fs.existsSync(steamcmdDir)) {
-    fs.mkdirSync(steamcmdDir, { recursive: true });
-  }
-
-  onStatus?.('Downloading SteamCMD utility from Valve...', 5);
-  const zipPath = path.join(steamcmdDir, 'steamcmd.zip');
-  await downloadFile('https://steamcdn-a.akamaihd.net/client/installer/steamcmd.zip', zipPath);
-
-  onStatus?.('Extracting SteamCMD...', 10);
-  const zip = new AdmZip(zipPath);
-  zip.extractAllTo(steamcmdDir, true);
-
-  try {
-    fs.unlinkSync(zipPath);
-  } catch {}
-
   if (!fs.existsSync(steamcmdExe)) {
-    throw new Error('Failed to extract steamcmd.exe from Valve archive');
+    if (!fs.existsSync(steamcmdDir)) {
+      fs.mkdirSync(steamcmdDir, { recursive: true });
+    }
+
+    onStatus?.('Downloading SteamCMD utility from Valve...', 5);
+    const zipPath = path.join(steamcmdDir, 'steamcmd.zip');
+    await downloadFile('https://steamcdn-a.akamaihd.net/client/installer/steamcmd.zip', zipPath);
+
+    onStatus?.('Extracting SteamCMD...', 10);
+    const zip = new AdmZip(zipPath);
+    zip.extractAllTo(steamcmdDir, true);
+
+    try {
+      fs.unlinkSync(zipPath);
+    } catch {}
+
+    if (!fs.existsSync(steamcmdExe)) {
+      throw new Error('Failed to extract steamcmd.exe from Valve archive');
+    }
+  }
+
+  // SteamCMD self-updates on first run and exits with code 7 or 0.
+  // Ensure it has finished bootstrapping before running actual server downloads.
+  const isFullyBootstrapped = fs.existsSync(path.join(steamcmdDir, 'steamclient.dll')) && fs.existsSync(path.join(steamcmdDir, 'steamapps'));
+  if (!isFullyBootstrapped) {
+    onStatus?.('Initializing and self-updating SteamCMD components...', 10);
+    await new Promise<void>((resolve) => {
+      const child = spawn(steamcmdExe, ['+quit'], {
+        cwd: steamcmdDir,
+        shell: false
+      });
+      child.on('close', () => {
+        resolve();
+      });
+      child.on('error', () => {
+        resolve();
+      });
+    });
   }
 
   return steamcmdExe;
@@ -1802,56 +1819,79 @@ ipcMain.handle('gmod:setup', async (_, options: CreateGModServerOptions) => {
     sendProgress('Checking SteamCMD installation...', 2);
     const steamcmdExe = await ensureSteamCMD((stage, pct) => sendProgress(stage, pct));
 
-    sendProgress("Starting SteamCMD download for Garry's Mod Dedicated Server (App ID 4020)...", 12);
+    const runSteamCmdInstall = (attempt: number = 1): Promise<void> => {
+      sendProgress(
+        attempt > 1
+          ? `Continuing Garry's Mod Dedicated Server download (Attempt ${attempt}/3)...`
+          : "Starting SteamCMD download for Garry's Mod Dedicated Server (App ID 4020)...",
+        15
+      );
 
-    // SteamCMD command: +force_install_dir "<path>" +login anonymous +app_update 4020 validate +quit
-    const args = [
-      '+force_install_dir', server.path,
-      '+login', 'anonymous',
-      '+app_update', '4020', 'validate',
-      '+quit'
-    ];
+      // SteamCMD command: +force_install_dir "<path>" +login anonymous +app_update 4020 validate +quit
+      const args = [
+        '+force_install_dir', server.path,
+        '+login', 'anonymous',
+        '+app_update', '4020', 'validate',
+        '+quit'
+      ];
 
-    await new Promise<void>((resolve, reject) => {
-      const child = spawn(steamcmdExe, args, {
-        cwd: path.dirname(steamcmdExe),
-        shell: false
+      return new Promise<void>((resolve, reject) => {
+        const child = spawn(steamcmdExe, args, {
+          cwd: path.dirname(steamcmdExe),
+          shell: false
+        });
+
+        child.stdout.on('data', (chunk) => {
+          const text = chunk.toString();
+          // Match: progress: 42.15 (123456 / 1234567)
+          const progressMatch = text.match(/progress:\s*([0-9.]+)\s*\(([^)]+)\)/i);
+          if (progressMatch) {
+            const rawPct = parseFloat(progressMatch[1]);
+            const scaledPct = Math.round(15 + (rawPct * 0.8));
+            sendProgress(
+              text.includes('verifying') ? "Verifying Garry's Mod server files..." : "Downloading Garry's Mod Dedicated Server...",
+              scaledPct,
+              progressMatch[2]
+            );
+          } else if (text.includes('Loading Steam API') || text.includes('Logging in user') || text.includes('Waiting for user info') || text.includes('Connecting anonymously')) {
+            sendProgress('Connecting anonymously to Steam...', 15, text.trim());
+          }
+        });
+
+        child.stderr.on('data', (chunk) => {
+          console.warn('SteamCMD stderr:', chunk.toString());
+        });
+
+        child.on('close', async (code) => {
+          const srcdsPath = path.join(server.path, 'srcds.exe');
+          if (fs.existsSync(srcdsPath)) {
+            resolve();
+            return;
+          }
+
+          // SteamCMD exits with code 7 when updating itself and requesting a restart,
+          // or may need an additional pass to finish app installation.
+          if (attempt < 3) {
+            console.log(`SteamCMD closed with code ${code}, retrying attempt ${attempt + 1}...`);
+            sendProgress(`SteamCMD update completed, continuing installation (Attempt ${attempt + 1})...`, 16);
+            try {
+              await runSteamCmdInstall(attempt + 1);
+              resolve();
+            } catch (retryErr) {
+              reject(retryErr);
+            }
+          } else {
+            reject(new Error(`SteamCMD exited with code ${code} and srcds.exe was not found. Please verify your internet connection.`));
+          }
+        });
+
+        child.on('error', (err) => {
+          reject(err);
+        });
       });
+    };
 
-      child.stdout.on('data', (chunk) => {
-        const text = chunk.toString();
-        // Match: progress: 42.15 (123456 / 1234567)
-        const progressMatch = text.match(/progress:\s*([0-9.]+)\s*\(([^)]+)\)/i);
-        if (progressMatch) {
-          const rawPct = parseFloat(progressMatch[1]);
-          const scaledPct = Math.round(15 + (rawPct * 0.8));
-          sendProgress(
-            text.includes('verifying') ? "Verifying Garry's Mod server files..." : "Downloading Garry's Mod Dedicated Server...",
-            scaledPct,
-            progressMatch[2]
-          );
-        } else if (text.includes('Loading Steam API') || text.includes('Logging in user') || text.includes('Waiting for user info')) {
-          sendProgress('Connecting anonymously to Steam...', 15, text.trim());
-        }
-      });
-
-      child.stderr.on('data', (chunk) => {
-        console.warn('SteamCMD stderr:', chunk.toString());
-      });
-
-      child.on('close', (code) => {
-        const srcdsPath = path.join(server.path, 'srcds.exe');
-        if (fs.existsSync(srcdsPath)) {
-          resolve();
-        } else {
-          reject(new Error(`SteamCMD exited with code ${code} and srcds.exe was not found.`));
-        }
-      });
-
-      child.on('error', (err) => {
-        reject(err);
-      });
-    });
+    await runSteamCmdInstall(1);
 
     sendProgress("Setting up Garry's Mod directories & default configuration...", 96);
 
