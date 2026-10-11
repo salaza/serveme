@@ -94,7 +94,19 @@ function saveServersToDisk(servers: ServerInstance[]) {
   }
 }
 
-function downloadFile(url: string, destPath: string): Promise<void> {
+function formatBytes(bytes: number): string {
+  if (bytes <= 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+
+function downloadFile(
+  url: string,
+  destPath: string,
+  onProgress?: (percent: number, downloadedBytes: number, totalBytes: number) => void
+): Promise<void> {
   return new Promise((resolve, reject) => {
     const file = fs.createWriteStream(destPath);
     const client = url.startsWith('https') ? https : http;
@@ -104,7 +116,7 @@ function downloadFile(url: string, destPath: string): Promise<void> {
       if (response.statusCode && response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
         file.close();
         try { fs.unlinkSync(destPath); } catch {}
-        downloadFile(response.headers.location, destPath).then(resolve).catch(reject);
+        downloadFile(response.headers.location, destPath, onProgress).then(resolve).catch(reject);
         return;
       }
 
@@ -114,6 +126,17 @@ function downloadFile(url: string, destPath: string): Promise<void> {
         reject(new Error(`Download failed with status: ${response.statusCode}`));
         return;
       }
+
+      const totalBytes = parseInt(response.headers['content-length'] || '0', 10);
+      let downloadedBytes = 0;
+
+      response.on('data', (chunk) => {
+        downloadedBytes += chunk.length;
+        if (totalBytes > 0 && onProgress) {
+          const pct = Math.round((downloadedBytes / totalBytes) * 100);
+          onProgress(pct, downloadedBytes, totalBytes);
+        }
+      });
 
       response.pipe(file);
       file.on('finish', () => {
@@ -130,7 +153,7 @@ function downloadFile(url: string, destPath: string): Promise<void> {
   });
 }
 
-async function ensureSteamCMD(onStatus?: (stage: string, percent?: number) => void): Promise<string> {
+async function ensureSteamCMD(onStatus?: (stage: string, percent?: number, details?: string) => void): Promise<string> {
   const steamcmdDir = path.join(userDataPath, 'steamcmd');
   const steamcmdExe = path.join(steamcmdDir, 'steamcmd.exe');
 
@@ -139,11 +162,17 @@ async function ensureSteamCMD(onStatus?: (stage: string, percent?: number) => vo
       fs.mkdirSync(steamcmdDir, { recursive: true });
     }
 
-    onStatus?.('Downloading SteamCMD utility from Valve...', 5);
+    onStatus?.('Downloading SteamCMD utility from Valve...', 0);
     const zipPath = path.join(steamcmdDir, 'steamcmd.zip');
-    await downloadFile('https://steamcdn-a.akamaihd.net/client/installer/steamcmd.zip', zipPath);
+    await downloadFile('https://steamcdn-a.akamaihd.net/client/installer/steamcmd.zip', zipPath, (pct, downloaded, total) => {
+      onStatus?.(
+        'Downloading SteamCMD utility from Valve...',
+        pct,
+        `${formatBytes(downloaded)} / ${formatBytes(total)}`
+      );
+    });
 
-    onStatus?.('Extracting SteamCMD...', 10);
+    onStatus?.('Extracting SteamCMD archive...', 100);
     const zip = new AdmZip(zipPath);
     zip.extractAllTo(steamcmdDir, true);
 
@@ -160,12 +189,32 @@ async function ensureSteamCMD(onStatus?: (stage: string, percent?: number) => vo
   // Ensure it has finished bootstrapping before running actual server downloads.
   const isFullyBootstrapped = fs.existsSync(path.join(steamcmdDir, 'steamclient.dll')) && fs.existsSync(path.join(steamcmdDir, 'steamapps'));
   if (!isFullyBootstrapped) {
-    onStatus?.('Initializing and self-updating SteamCMD components...', 10);
+    onStatus?.('Initializing and self-updating SteamCMD components...', 0);
     await new Promise<void>((resolve) => {
       const child = spawn(steamcmdExe, ['+quit'], {
         cwd: steamcmdDir,
         shell: false
       });
+
+      let buffer = '';
+      child.stdout.on('data', (chunk) => {
+        buffer += chunk.toString();
+        // SteamCMD outputs: Downloading update (25,617 of 43,472 KB)...
+        const updateMatch = buffer.match(/Downloading update \(([0-9,]+)\s+of\s+([0-9,]+)\s*KB\)/i);
+        if (updateMatch) {
+          const currentKB = parseInt(updateMatch[1].replace(/,/g, ''), 10);
+          const totalKB = parseInt(updateMatch[2].replace(/,/g, ''), 10);
+          if (totalKB > 0) {
+            const pct = Math.round((currentKB / totalKB) * 100);
+            onStatus?.(
+              'Updating SteamCMD runtime components...',
+              pct,
+              `${(currentKB / 1024).toFixed(1)} MB / ${(totalKB / 1024).toFixed(1)} MB`
+            );
+          }
+        }
+      });
+
       child.on('close', () => {
         resolve();
       });
@@ -340,7 +389,19 @@ ipcMain.handle('server:setup', async (_, { server, downloadUrl, jarName, acceptE
     // Download server jar
     const destJar = path.join(server.path, jarName);
     if (downloadUrl) {
-      await downloadFile(downloadUrl, destJar);
+      mainWindow?.webContents.send('server:setupProgress', {
+        serverId: server.id,
+        stage: `Downloading ${jarName}...`,
+        percent: 0
+      });
+      await downloadFile(downloadUrl, destJar, (pct, downloaded, total) => {
+        mainWindow?.webContents.send('server:setupProgress', {
+          serverId: server.id,
+          stage: `Downloading ${jarName}...`,
+          percent: pct,
+          details: `${formatBytes(downloaded)} / ${formatBytes(total)}`
+        });
+      });
     }
 
     // Create start.bat for Windows
@@ -1816,15 +1877,15 @@ ipcMain.handle('gmod:setup', async (_, options: CreateGModServerOptions) => {
       });
     };
 
-    sendProgress('Checking SteamCMD installation...', 2);
-    const steamcmdExe = await ensureSteamCMD((stage, pct) => sendProgress(stage, pct));
+    sendProgress('Checking SteamCMD installation...', 0);
+    const steamcmdExe = await ensureSteamCMD((stage, pct, details) => sendProgress(stage, pct, details));
 
     const runSteamCmdInstall = (attempt: number = 1): Promise<void> => {
       sendProgress(
         attempt > 1
           ? `Continuing Garry's Mod Dedicated Server download (Attempt ${attempt}/3)...`
           : "Starting SteamCMD download for Garry's Mod Dedicated Server (App ID 4020)...",
-        15
+        undefined
       );
 
       // SteamCMD command: +force_install_dir "<path>" +login anonymous +app_update 4020 validate +quit
@@ -1843,18 +1904,30 @@ ipcMain.handle('gmod:setup', async (_, options: CreateGModServerOptions) => {
 
         child.stdout.on('data', (chunk) => {
           const text = chunk.toString();
-          // Match: progress: 42.15 (123456 / 1234567)
-          const progressMatch = text.match(/progress:\s*([0-9.]+)\s*\(([^)]+)\)/i);
-          if (progressMatch) {
-            const rawPct = parseFloat(progressMatch[1]);
-            const scaledPct = Math.round(15 + (rawPct * 0.8));
-            sendProgress(
-              text.includes('verifying') ? "Verifying Garry's Mod server files..." : "Downloading Garry's Mod Dedicated Server...",
-              scaledPct,
-              progressMatch[2]
-            );
+          // Match all progress updates in chunk (SteamCMD updates via \r)
+          const matches = [...text.matchAll(/progress:\s*([0-9.]+)(?:\s*\(\s*([0-9]+)\s*\/\s*([0-9]+)\s*\))?/gi)];
+          if (matches.length > 0) {
+            const lastMatch = matches[matches.length - 1];
+            const rawPct = parseFloat(lastMatch[1]);
+            const isVerifying = text.includes('verifying') || text.includes('validating');
+            const isPreallocating = text.includes('preallocating');
+
+            let byteDetails = '';
+            if (lastMatch[2] && lastMatch[3]) {
+              const cur = parseInt(lastMatch[2], 10);
+              const tot = parseInt(lastMatch[3], 10);
+              byteDetails = `${formatBytes(cur)} / ${formatBytes(tot)}`;
+            }
+
+            const stageName = isVerifying
+              ? "Verifying Garry's Mod server files..."
+              : isPreallocating
+              ? 'Preallocating disk space for server files...'
+              : "Downloading Garry's Mod Dedicated Server...";
+
+            sendProgress(stageName, rawPct, byteDetails);
           } else if (text.includes('Loading Steam API') || text.includes('Logging in user') || text.includes('Waiting for user info') || text.includes('Connecting anonymously')) {
-            sendProgress('Connecting anonymously to Steam...', 15, text.trim());
+            sendProgress('Connecting anonymously to Steam...', undefined, text.trim());
           }
         });
 

@@ -165,27 +165,28 @@ export const CreateServerModal: React.FC<CreateServerModalProps> = ({
   };
 
   const handleCreate = async () => {
+    let unsubscribeProgress: (() => void) | null = null;
     try {
       setError(null);
       setIsInstalling(true);
       setInstallPercent(null);
       setInstallDetails('');
 
+      unsubscribeProgress = window.electronAPI.onServerSetupProgress((data) => {
+        setInstallStatus(data.stage);
+        if (typeof data.percent === 'number') {
+          setInstallPercent(data.percent);
+        }
+        if (data.details) {
+          setInstallDetails(data.details);
+        }
+      });
+
       // ==========================================
       // Garry's Mod Server Creation Flow
       // ==========================================
       if (gameType === 'gmod') {
         setInstallStatus("Preparing SteamCMD for Garry's Mod dedicated server...");
-
-        const unsubscribeProgress = window.electronAPI.onServerSetupProgress((data) => {
-          setInstallStatus(data.stage);
-          if (typeof data.percent === 'number') {
-            setInstallPercent(data.percent);
-          }
-          if (data.details) {
-            setInstallDetails(data.details);
-          }
-        });
 
         const newServer: ServerInstance = {
           id: `srv-${Date.now()}`,
@@ -205,27 +206,23 @@ export const CreateServerModal: React.FC<CreateServerModalProps> = ({
           }
         };
 
-        try {
-          const result = await window.electronAPI.setupGModServer({
-            server: newServer,
-            gamemode: gmodGamemode,
-            defaultMap: gmodDefaultMap,
-            maxPlayers: gmodMaxPlayers,
-            tickrate: gmodTickrate,
-            workshopCollectionId: gmodWorkshopCollectionId,
-            steamApiKey: gmodSteamApiKey
-          });
+        const result = await window.electronAPI.setupGModServer({
+          server: newServer,
+          gamemode: gmodGamemode,
+          defaultMap: gmodDefaultMap,
+          maxPlayers: gmodMaxPlayers,
+          tickrate: gmodTickrate,
+          workshopCollectionId: gmodWorkshopCollectionId,
+          steamApiKey: gmodSteamApiKey
+        });
 
-          if (!result.success) {
-            throw new Error(result.error || "Failed to setup Garry's Mod server");
-          }
-
-          setInstallStatus('Server ready!');
-          onServerCreated(newServer);
-          onClose();
-        } finally {
-          unsubscribeProgress();
+        if (!result.success) {
+          throw new Error(result.error || "Failed to setup Garry's Mod server");
         }
+
+        setInstallStatus('Server ready!');
+        onServerCreated(newServer);
+        onClose();
         return;
       }
 
@@ -300,6 +297,9 @@ export const CreateServerModal: React.FC<CreateServerModalProps> = ({
       console.error(err);
       setError(err.message || 'An error occurred during server creation');
     } finally {
+      if (unsubscribeProgress) {
+        unsubscribeProgress();
+      }
       setIsInstalling(false);
     }
   };
@@ -693,26 +693,38 @@ export const CreateServerModal: React.FC<CreateServerModalProps> = ({
         <div className="px-6 py-4 border-t border-slate-800 bg-slate-900/90 flex flex-col sm:flex-row items-center justify-between gap-4">
           <div className="text-xs text-slate-400 flex-1 w-full">
             {isInstalling && (
-              <div className="space-y-1.5 w-full">
+              <div className="space-y-2 w-full">
                 <div className="flex items-center justify-between text-xs font-medium">
-                  <span className="flex items-center gap-2 text-emerald-400">
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    <span>{installStatus}</span>
+                  <span className={`flex items-center gap-2 truncate pr-2 ${gameType === 'gmod' ? 'text-blue-400' : 'text-emerald-400'}`}>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                    <span className="truncate">{installStatus}</span>
                   </span>
-                  {installPercent !== null && (
-                    <span className="font-mono text-slate-300">{installPercent}%</span>
+                  {typeof installPercent === 'number' && (
+                    <span className="font-mono text-white font-bold shrink-0 text-xs">
+                      {installPercent.toFixed(1)}%
+                    </span>
                   )}
                 </div>
-                {installPercent !== null && (
-                  <div className="w-full bg-slate-950 rounded-full h-1.5 overflow-hidden border border-slate-800">
-                    <div
-                      className="bg-emerald-500 h-full transition-all duration-300"
-                      style={{ width: `${installPercent}%` }}
-                    />
-                  </div>
-                )}
+                {/* Progress Bar */}
+                <div className="w-full bg-slate-950 rounded-full h-2 overflow-hidden border border-slate-800">
+                  <div
+                    className={`h-full transition-all duration-150 ${
+                      gameType === 'gmod' ? 'bg-blue-500' : 'bg-emerald-500'
+                    }`}
+                    style={{
+                      width: `${Math.min(100, Math.max(typeof installPercent === 'number' ? installPercent : 5, 2))}%`
+                    }}
+                  />
+                </div>
                 {installDetails && (
-                  <p className="text-[10px] text-slate-500 font-mono truncate">{installDetails}</p>
+                  <div className="flex items-center justify-between text-[11px] text-slate-400 font-mono">
+                    <span className="truncate">{installDetails}</span>
+                    {typeof installPercent === 'number' && (
+                      <span className="shrink-0 text-slate-500 ml-2">
+                        {gameType === 'gmod' ? 'Steam Dedicated Server' : 'Minecraft Server'}
+                      </span>
+                    )}
+                  </div>
                 )}
               </div>
             )}
