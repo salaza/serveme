@@ -12,7 +12,10 @@ import {
   RegenerateWorldOptions,
   ExportModpackOptions,
   ExportModpackResult,
-  LocalClientMod
+  LocalClientMod,
+  CreateGModServerOptions,
+  GModAddonInfo,
+  GModServerConfig
 } from '../src/types';
 
 export const electronAPI = {
@@ -136,7 +139,26 @@ export const electronAPI = {
   exportModpack: (options: ExportModpackOptions): Promise<ExportModpackResult> =>
     ipcRenderer.invoke('modpack:export', options),
   showItemInFolder: (filePath: string): Promise<void> =>
-    ipcRenderer.invoke('shell:showItemInFolder', filePath)
+    ipcRenderer.invoke('shell:showItemInFolder', filePath),
+
+  // Garry's Mod Dedicated Server
+  setupGModServer: (options: CreateGModServerOptions): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('gmod:setup', options),
+  onServerSetupProgress: (callback: (data: { serverId: string; stage: string; percent?: number; details?: string }) => void) => {
+    const subscription = (_: any, data: any) => callback(data);
+    ipcRenderer.on('server:setupProgress', subscription);
+    return () => ipcRenderer.removeListener('server:setupProgress', subscription);
+  },
+  getGModAddons: (serverPath: string): Promise<GModAddonInfo[]> =>
+    ipcRenderer.invoke('gmod:getAddons', serverPath),
+  toggleGModAddon: (serverPath: string, fileName: string, enable: boolean): Promise<boolean> =>
+    ipcRenderer.invoke('gmod:toggleAddon', { serverPath, fileName, enable }),
+  deleteGModAddon: (serverPath: string, fileName: string): Promise<boolean> =>
+    ipcRenderer.invoke('gmod:deleteAddon', { serverPath, fileName }),
+  readGModServerCfg: (serverPath: string): Promise<string> =>
+    ipcRenderer.invoke('gmod:readServerCfg', serverPath),
+  saveGModServerCfg: (serverPath: string, content: string): Promise<boolean> =>
+    ipcRenderer.invoke('gmod:saveServerCfg', { serverPath, content })
 };
 
 contextBridge.exposeInMainWorld('electronAPI', electronAPI);

@@ -19,7 +19,10 @@ import {
   RegenerateWorldOptions,
   ExportModpackOptions,
   ExportModpackResult,
-  LocalClientMod
+  LocalClientMod,
+  CreateGModServerOptions,
+  GModAddonInfo,
+  GModServerConfig
 } from '../src/types';
 
 let mainWindow: BrowserWindow | null = null;
@@ -125,6 +128,37 @@ function downloadFile(url: string, destPath: string): Promise<void> {
       reject(err);
     });
   });
+}
+
+async function ensureSteamCMD(onStatus?: (stage: string, percent?: number) => void): Promise<string> {
+  const steamcmdDir = path.join(userDataPath, 'steamcmd');
+  const steamcmdExe = path.join(steamcmdDir, 'steamcmd.exe');
+
+  if (fs.existsSync(steamcmdExe)) {
+    return steamcmdExe;
+  }
+
+  if (!fs.existsSync(steamcmdDir)) {
+    fs.mkdirSync(steamcmdDir, { recursive: true });
+  }
+
+  onStatus?.('Downloading SteamCMD utility from Valve...', 5);
+  const zipPath = path.join(steamcmdDir, 'steamcmd.zip');
+  await downloadFile('https://steamcdn-a.akamaihd.net/client/installer/steamcmd.zip', zipPath);
+
+  onStatus?.('Extracting SteamCMD...', 10);
+  const zip = new AdmZip(zipPath);
+  zip.extractAllTo(steamcmdDir, true);
+
+  try {
+    fs.unlinkSync(zipPath);
+  } catch {}
+
+  if (!fs.existsSync(steamcmdExe)) {
+    throw new Error('Failed to extract steamcmd.exe from Valve archive');
+  }
+
+  return steamcmdExe;
 }
 
 function createWindow() {
@@ -328,7 +362,84 @@ ipcMain.handle('server:start', async (_, serverId: string) => {
     return { success: false, error: 'Server directory does not exist' };
   }
 
-  // Find server jar file
+  // Garry's Mod Dedicated Server handling
+  if (server.game === 'gmod') {
+    const srcdsPath = path.join(server.path, 'srcds.exe');
+    if (!fs.existsSync(srcdsPath)) {
+      return { success: false, error: 'srcds.exe not found in server directory. Please verify server installation.' };
+    }
+
+    const cfg = server.gmodConfig;
+    const args = [
+      '-game', 'garrysmod',
+      '-console',
+      '-port', String(server.port || 27015),
+      '+maxplayers', String(cfg?.maxPlayers || 16),
+      '+map', cfg?.defaultMap || 'gm_construct',
+      '+gamemode', cfg?.gamemode || 'sandbox',
+      '-tickrate', String(cfg?.tickrate || 66),
+      '+hostname', server.name
+    ];
+
+    if (cfg?.workshopCollectionId) {
+      args.push('+host_workshop_collection', cfg.workshopCollectionId.trim());
+    }
+    if (cfg?.steamApiKey) {
+      args.push('-authkey', cfg.steamApiKey.trim());
+    }
+    if (cfg?.rconPassword) {
+      args.push('+rcon_password', cfg.rconPassword.trim());
+    }
+    if (cfg?.serverPassword) {
+      args.push('+sv_password', cfg.serverPassword.trim());
+    }
+
+    try {
+      const child = spawn(srcdsPath, args, {
+        cwd: server.path,
+        shell: false
+      });
+
+      runningProcesses.set(serverId, child);
+      mainWindow?.webContents.send('server:status', { serverId, status: 'running' });
+
+      child.stdout.on('data', (data) => {
+        const text = data.toString();
+        mainWindow?.webContents.send('server:log', { serverId, log: text, type: 'stdout' });
+      });
+
+      child.stderr.on('data', (data) => {
+        const text = data.toString();
+        mainWindow?.webContents.send('server:log', { serverId, log: text, type: 'stderr' });
+      });
+
+      child.on('close', (code) => {
+        runningProcesses.delete(serverId);
+        mainWindow?.webContents.send('server:status', { serverId, status: 'stopped' });
+        mainWindow?.webContents.send('server:log', {
+          serverId,
+          log: `[System] Garry's Mod server stopped with exit code ${code}\n`,
+          type: 'system'
+        });
+      });
+
+      child.on('error', (err) => {
+        runningProcesses.delete(serverId);
+        mainWindow?.webContents.send('server:status', { serverId, status: 'stopped' });
+        mainWindow?.webContents.send('server:log', {
+          serverId,
+          log: `[System Error] Failed to launch Garry's Mod server: ${err.message}\n`,
+          type: 'stderr'
+        });
+      });
+
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err.message };
+    }
+  }
+
+  // Minecraft Server handling
   let jarName = 'server.jar';
   const files = fs.readdirSync(server.path);
   const potentialJars = files.filter(f => f.endsWith('.jar') && !f.includes('installer'));
@@ -408,8 +519,16 @@ ipcMain.handle('server:stop', async (_, serverId: string) => {
   const child = runningProcesses.get(serverId);
   if (!child) return { success: true };
 
+  const servers = loadServers();
+  const server = servers.find(s => s.id === serverId);
+
   mainWindow?.webContents.send('server:status', { serverId, status: 'stopping' });
-  child.stdin?.write('stop\n');
+  
+  if (server?.game === 'gmod') {
+    child.stdin?.write('quit\n');
+  } else {
+    child.stdin?.write('stop\n');
+  }
 
   // Safety fallback after 12 seconds
   setTimeout(() => {
@@ -1657,5 +1776,268 @@ ipcMain.handle('worlds:deleteBackup', async (_, { serverPath, backupFileName }: 
   }
   return false;
 });
+
+// ==========================================
+// GARRY'S MOD DEDICATED SERVER IPC HANDLERS
+// ==========================================
+
+ipcMain.handle('gmod:setup', async (_, options: CreateGModServerOptions) => {
+  const { server, gamemode, defaultMap, maxPlayers, tickrate, workshopCollectionId, steamApiKey } = options;
+  const serverId = server.id;
+
+  try {
+    if (!fs.existsSync(server.path)) {
+      fs.mkdirSync(server.path, { recursive: true });
+    }
+
+    const sendProgress = (stage: string, percent?: number, details?: string) => {
+      mainWindow?.webContents.send('server:setupProgress', {
+        serverId,
+        stage,
+        percent,
+        details
+      });
+    };
+
+    sendProgress('Checking SteamCMD installation...', 2);
+    const steamcmdExe = await ensureSteamCMD((stage, pct) => sendProgress(stage, pct));
+
+    sendProgress("Starting SteamCMD download for Garry's Mod Dedicated Server (App ID 4020)...", 12);
+
+    // SteamCMD command: +force_install_dir "<path>" +login anonymous +app_update 4020 validate +quit
+    const args = [
+      '+force_install_dir', server.path,
+      '+login', 'anonymous',
+      '+app_update', '4020', 'validate',
+      '+quit'
+    ];
+
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(steamcmdExe, args, {
+        cwd: path.dirname(steamcmdExe),
+        shell: false
+      });
+
+      child.stdout.on('data', (chunk) => {
+        const text = chunk.toString();
+        // Match: progress: 42.15 (123456 / 1234567)
+        const progressMatch = text.match(/progress:\s*([0-9.]+)\s*\(([^)]+)\)/i);
+        if (progressMatch) {
+          const rawPct = parseFloat(progressMatch[1]);
+          const scaledPct = Math.round(15 + (rawPct * 0.8));
+          sendProgress(
+            text.includes('verifying') ? "Verifying Garry's Mod server files..." : "Downloading Garry's Mod Dedicated Server...",
+            scaledPct,
+            progressMatch[2]
+          );
+        } else if (text.includes('Loading Steam API') || text.includes('Logging in user') || text.includes('Waiting for user info')) {
+          sendProgress('Connecting anonymously to Steam...', 15, text.trim());
+        }
+      });
+
+      child.stderr.on('data', (chunk) => {
+        console.warn('SteamCMD stderr:', chunk.toString());
+      });
+
+      child.on('close', (code) => {
+        const srcdsPath = path.join(server.path, 'srcds.exe');
+        if (fs.existsSync(srcdsPath)) {
+          resolve();
+        } else {
+          reject(new Error(`SteamCMD exited with code ${code} and srcds.exe was not found.`));
+        }
+      });
+
+      child.on('error', (err) => {
+        reject(err);
+      });
+    });
+
+    sendProgress("Setting up Garry's Mod directories & default configuration...", 96);
+
+    const cfgDir = path.join(server.path, 'garrysmod', 'cfg');
+    if (!fs.existsSync(cfgDir)) {
+      fs.mkdirSync(cfgDir, { recursive: true });
+    }
+    const addonsDir = path.join(server.path, 'garrysmod', 'addons');
+    if (!fs.existsSync(addonsDir)) {
+      fs.mkdirSync(addonsDir, { recursive: true });
+    }
+
+    const serverCfgPath = path.join(cfgDir, 'server.cfg');
+    if (!fs.existsSync(serverCfgPath)) {
+      const defaultCfg = [
+        `// Garry's Mod Server Configuration generated by Game Server Builder`,
+        `hostname "${server.name}"`,
+        `sv_password ""`,
+        `rcon_password ""`,
+        ``,
+        `// Network & Download settings`,
+        `sv_loadingurl ""`,
+        `sv_allowdownload 1`,
+        `sv_allowupload 1`,
+        `net_maxfilesize 64`,
+        ``,
+        `// Sandbox & Gameplay Settings`,
+        `sbox_allownpcs 1`,
+        `sbox_godmode 0`,
+        `sbox_plpldamage 0`,
+        `sbox_noclip 1`,
+        ``,
+        `// Voice & Chat`,
+        `sv_voiceenable 1`,
+        `sv_alltalk 1`
+      ].join('\n');
+      fs.writeFileSync(serverCfgPath, defaultCfg, 'utf-8');
+    }
+
+    // Save server instance
+    const gmodServer: ServerInstance = {
+      ...server,
+      game: 'gmod',
+      gmodConfig: {
+        gamemode: gamemode || 'sandbox',
+        defaultMap: defaultMap || 'gm_construct',
+        maxPlayers: maxPlayers || 16,
+        tickrate: tickrate || 66,
+        workshopCollectionId: workshopCollectionId?.trim() || undefined,
+        steamApiKey: steamApiKey?.trim() || undefined
+      }
+    };
+
+    const servers = loadServers();
+    const existingIdx = servers.findIndex(s => s.id === gmodServer.id);
+    if (existingIdx >= 0) {
+      servers[existingIdx] = gmodServer;
+    } else {
+      servers.push(gmodServer);
+    }
+    saveServersToDisk(servers);
+
+    sendProgress('Server installation complete!', 100);
+    return { success: true };
+  } catch (err: any) {
+    console.error('GMod setup failed:', err);
+    return { success: false, error: err.message || "Failed to setup Garry's Mod server" };
+  }
+});
+
+ipcMain.handle('gmod:getAddons', async (_, serverPath: string): Promise<GModAddonInfo[]> => {
+  const addonsDir = path.join(serverPath, 'garrysmod', 'addons');
+  if (!fs.existsSync(addonsDir)) return [];
+
+  const results: GModAddonInfo[] = [];
+  try {
+    const entries = fs.readdirSync(addonsDir, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = path.join(addonsDir, entry.name);
+      const isFolder = entry.isDirectory();
+      const isGma = entry.name.toLowerCase().endsWith('.gma') || entry.name.toLowerCase().endsWith('.gma.disabled');
+      const isDisabled = entry.name.endsWith('.disabled');
+
+      if (!isFolder && !isGma) continue;
+
+      let sizeBytes = 0;
+      try {
+        if (!isFolder) {
+          sizeBytes = fs.statSync(fullPath).size;
+        } else {
+          const getDirSize = (dir: string): number => {
+            let total = 0;
+            try {
+              const files = fs.readdirSync(dir, { withFileTypes: true });
+              for (const f of files) {
+                const p = path.join(dir, f.name);
+                if (f.isDirectory()) total += getDirSize(p);
+                else total += fs.statSync(p).size;
+              }
+            } catch {}
+            return total;
+          };
+          sizeBytes = getDirSize(fullPath);
+        }
+      } catch {}
+
+      let cleanName = entry.name;
+      if (cleanName.endsWith('.disabled')) {
+        cleanName = cleanName.slice(0, -9);
+      }
+      if (cleanName.toLowerCase().endsWith('.gma')) {
+        cleanName = cleanName.slice(0, -4);
+      }
+      cleanName = cleanName.replace(/[-_]/g, ' ');
+
+      results.push({
+        name: cleanName,
+        fileName: entry.name,
+        filePath: fullPath,
+        isFolder,
+        enabled: !isDisabled,
+        sizeBytes
+      });
+    }
+  } catch (err) {
+    console.error('Failed to read GMod addons:', err);
+  }
+  return results;
+});
+
+ipcMain.handle('gmod:toggleAddon', async (_, { serverPath, fileName, enable }: { serverPath: string; fileName: string; enable: boolean }) => {
+  const addonsDir = path.join(serverPath, 'garrysmod', 'addons');
+  const source = path.join(addonsDir, fileName);
+  if (!fs.existsSync(source)) return false;
+
+  let targetName = fileName;
+  if (enable && fileName.endsWith('.disabled')) {
+    targetName = fileName.slice(0, -9);
+  } else if (!enable && !fileName.endsWith('.disabled')) {
+    targetName = fileName + '.disabled';
+  }
+
+  const target = path.join(addonsDir, targetName);
+  try {
+    fs.renameSync(source, target);
+    return true;
+  } catch (err) {
+    console.error('Failed to toggle GMod addon:', err);
+    return false;
+  }
+});
+
+ipcMain.handle('gmod:deleteAddon', async (_, { serverPath, fileName }: { serverPath: string; fileName: string }) => {
+  const target = path.join(serverPath, 'garrysmod', 'addons', fileName);
+  if (!fs.existsSync(target)) return false;
+  try {
+    fs.rmSync(target, { recursive: true, force: true });
+    return true;
+  } catch (err) {
+    console.error('Failed to delete GMod addon:', err);
+    return false;
+  }
+});
+
+ipcMain.handle('gmod:readServerCfg', async (_, serverPath: string) => {
+  const cfgPath = path.join(serverPath, 'garrysmod', 'cfg', 'server.cfg');
+  if (fs.existsSync(cfgPath)) {
+    return fs.readFileSync(cfgPath, 'utf-8');
+  }
+  return '';
+});
+
+ipcMain.handle('gmod:saveServerCfg', async (_, { serverPath, content }: { serverPath: string; content: string }) => {
+  const cfgDir = path.join(serverPath, 'garrysmod', 'cfg');
+  if (!fs.existsSync(cfgDir)) {
+    fs.mkdirSync(cfgDir, { recursive: true });
+  }
+  const cfgPath = path.join(cfgDir, 'server.cfg');
+  try {
+    fs.writeFileSync(cfgPath, content, 'utf-8');
+    return true;
+  } catch (err) {
+    console.error('Failed to write server.cfg:', err);
+    return false;
+  }
+});
+
 
 

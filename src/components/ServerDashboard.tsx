@@ -4,6 +4,8 @@ import { ConsoleTab } from './ConsoleTab';
 import { ModsTab } from './ModsTab';
 import { ConfigTab } from './ConfigTab';
 import { WorldsTab } from './WorldsTab';
+import { GModAddonsTab } from './GModAddonsTab';
+import { GModConfigTab } from './GModConfigTab';
 import {
   Terminal,
   Package,
@@ -36,7 +38,7 @@ export const ServerDashboard: React.FC<ServerDashboardProps> = ({
   onServerUpdated,
   onServerDeleted
 }) => {
-  const [activeTab, setActiveTab] = useState<'console' | 'mods' | 'worlds' | 'config'>('console');
+  const [activeTab, setActiveTab] = useState<'console' | 'mods' | 'worlds' | 'config' | 'addons' | 'gmod_config'>('console');
   const [isStarting, setIsStarting] = useState(false);
   const [isStopping, setIsStopping] = useState(false);
   const [isCheckingPort, setIsCheckingPort] = useState(false);
@@ -50,7 +52,30 @@ export const ServerDashboard: React.FC<ServerDashboardProps> = ({
   const initiateStart = async () => {
     setIsStarting(true);
     try {
-      // 1. Check Java Version compatibility
+      if (server.game === 'gmod') {
+        // GMod dedicated server: Check Port and launch directly (no Java required)
+        setIsCheckingPort(true);
+        let check: PortCheckResult | null = null;
+        try {
+          check = await window.electronAPI.checkPort(server.port, server.id);
+        } catch (err) {
+          console.warn('Port check error:', err);
+        } finally {
+          setIsCheckingPort(false);
+        }
+
+        if (check && !check.isOpen) {
+          setPortWarningResult(check);
+          setIsPortModalOpen(true);
+          setIsStarting(false);
+          return;
+        }
+
+        await executeStart();
+        return;
+      }
+
+      // Minecraft: Check Java Version compatibility
       const javaVal = await window.electronAPI.validateServerJava({
         mcVersion: server.version,
         javaPath: server.javaPath || 'java'
@@ -202,16 +227,31 @@ export const ServerDashboard: React.FC<ServerDashboardProps> = ({
           </div>
 
           {/* Badges */}
-          <div className="flex items-center gap-3 text-xs text-slate-400 mt-1">
-            <span className="flex items-center gap-1 text-slate-300 font-mono text-[11px]">
-              <Tag className="w-3.5 h-3.5 text-emerald-400" />
-              <span className="capitalize">{server.loader}</span> {server.version}
-            </span>
-            <span className="text-slate-600">&bull;</span>
-            <span className="font-mono text-slate-400 text-[11px]">Port: {server.port}</span>
-            <span className="text-slate-600">&bull;</span>
-            <span className="font-mono text-slate-400 text-[11px]">{server.ramMin}-{server.ramMax} GB RAM</span>
-          </div>
+          {server.game === 'gmod' ? (
+            <div className="flex items-center gap-3 text-xs text-slate-400 mt-1">
+              <span className="flex items-center gap-1 text-slate-300 font-mono text-[11px]">
+                <Tag className="w-3.5 h-3.5 text-blue-400" />
+                <span>Garry&apos;s Mod</span> &bull; <span className="capitalize">{server.gmodConfig?.gamemode || 'sandbox'}</span>
+              </span>
+              <span className="text-slate-600">&bull;</span>
+              <span className="font-mono text-slate-400 text-[11px]">Map: {server.gmodConfig?.defaultMap || 'gm_construct'}</span>
+              <span className="text-slate-600">&bull;</span>
+              <span className="font-mono text-slate-400 text-[11px]">Port: {server.port}</span>
+              <span className="text-slate-600">&bull;</span>
+              <span className="font-mono text-slate-400 text-[11px]">{server.gmodConfig?.tickrate || 66} Tick</span>
+            </div>
+          ) : (
+            <div className="flex items-center gap-3 text-xs text-slate-400 mt-1">
+              <span className="flex items-center gap-1 text-slate-300 font-mono text-[11px]">
+                <Tag className="w-3.5 h-3.5 text-emerald-400" />
+                <span className="capitalize">{server.loader}</span> {server.version}
+              </span>
+              <span className="text-slate-600">&bull;</span>
+              <span className="font-mono text-slate-400 text-[11px]">Port: {server.port}</span>
+              <span className="text-slate-600">&bull;</span>
+              <span className="font-mono text-slate-400 text-[11px]">{server.ramMin}-{server.ramMax} GB RAM</span>
+            </div>
+          )}
         </div>
 
         {/* Action Buttons */}
@@ -276,41 +316,71 @@ export const ServerDashboard: React.FC<ServerDashboardProps> = ({
           <span>Console & Logs</span>
         </button>
 
-        <button
-          onClick={() => setActiveTab('mods')}
-          className={`py-3 text-xs font-semibold border-b-2 flex items-center gap-2 transition ${
-            activeTab === 'mods'
-              ? 'border-emerald-500 text-emerald-400'
-              : 'border-transparent text-slate-400 hover:text-slate-200'
-          }`}
-        >
-          <Package className="w-4 h-4" />
-          <span>Mods & Modlists</span>
-        </button>
+        {server.game === 'gmod' ? (
+          <>
+            <button
+              onClick={() => setActiveTab('addons')}
+              className={`py-3 text-xs font-semibold border-b-2 flex items-center gap-2 transition ${
+                activeTab === 'addons' || activeTab === 'mods'
+                  ? 'border-blue-500 text-blue-400'
+                  : 'border-transparent text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <Package className="w-4 h-4" />
+              <span>Addons & Workshop</span>
+            </button>
 
-        <button
-          onClick={() => setActiveTab('worlds')}
-          className={`py-3 text-xs font-semibold border-b-2 flex items-center gap-2 transition ${
-            activeTab === 'worlds'
-              ? 'border-emerald-500 text-emerald-400'
-              : 'border-transparent text-slate-400 hover:text-slate-200'
-          }`}
-        >
-          <Globe className="w-4 h-4" />
-          <span>Worlds & Backups</span>
-        </button>
+            <button
+              onClick={() => setActiveTab('gmod_config')}
+              className={`py-3 text-xs font-semibold border-b-2 flex items-center gap-2 transition ${
+                activeTab === 'gmod_config' || activeTab === 'config'
+                  ? 'border-blue-500 text-blue-400'
+                  : 'border-transparent text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <Sliders className="w-4 h-4" />
+              <span>Server Config (server.cfg)</span>
+            </button>
+          </>
+        ) : (
+          <>
+            <button
+              onClick={() => setActiveTab('mods')}
+              className={`py-3 text-xs font-semibold border-b-2 flex items-center gap-2 transition ${
+                activeTab === 'mods'
+                  ? 'border-emerald-500 text-emerald-400'
+                  : 'border-transparent text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <Package className="w-4 h-4" />
+              <span>Mods & Modlists</span>
+            </button>
 
-        <button
-          onClick={() => setActiveTab('config')}
-          className={`py-3 text-xs font-semibold border-b-2 flex items-center gap-2 transition ${
-            activeTab === 'config'
-              ? 'border-emerald-500 text-emerald-400'
-              : 'border-transparent text-slate-400 hover:text-slate-200'
-          }`}
-        >
-          <Sliders className="w-4 h-4" />
-          <span>Configuration & JVM</span>
-        </button>
+            <button
+              onClick={() => setActiveTab('worlds')}
+              className={`py-3 text-xs font-semibold border-b-2 flex items-center gap-2 transition ${
+                activeTab === 'worlds'
+                  ? 'border-emerald-500 text-emerald-400'
+                  : 'border-transparent text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <Globe className="w-4 h-4" />
+              <span>Worlds & Backups</span>
+            </button>
+
+            <button
+              onClick={() => setActiveTab('config')}
+              className={`py-3 text-xs font-semibold border-b-2 flex items-center gap-2 transition ${
+                activeTab === 'config'
+                  ? 'border-emerald-500 text-emerald-400'
+                  : 'border-transparent text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <Sliders className="w-4 h-4" />
+              <span>Configuration & JVM</span>
+            </button>
+          </>
+        )}
       </div>
 
       {/* Main Content Area */}
@@ -324,24 +394,37 @@ export const ServerDashboard: React.FC<ServerDashboardProps> = ({
             isStopping={isStopping}
           />
         )}
-        {activeTab === 'mods' && (
-          <ModsTab
-            server={server}
-            settings={settings}
-          />
-        )}
-        {activeTab === 'worlds' && (
-          <WorldsTab
-            server={server}
-            onServerUpdated={onServerUpdated}
-            isServerRunning={isRunning}
-          />
-        )}
-        {activeTab === 'config' && (
-          <ConfigTab
-            server={server}
-            onServerUpdated={onServerUpdated}
-          />
+        {server.game === 'gmod' ? (
+          <>
+            {(activeTab === 'addons' || activeTab === 'mods') && (
+              <GModAddonsTab server={server} />
+            )}
+            {(activeTab === 'gmod_config' || activeTab === 'config') && (
+              <GModConfigTab server={server} onServerUpdated={onServerUpdated} />
+            )}
+          </>
+        ) : (
+          <>
+            {activeTab === 'mods' && (
+              <ModsTab
+                server={server}
+                settings={settings}
+              />
+            )}
+            {activeTab === 'worlds' && (
+              <WorldsTab
+                server={server}
+                onServerUpdated={onServerUpdated}
+                isServerRunning={isRunning}
+              />
+            )}
+            {activeTab === 'config' && (
+              <ConfigTab
+                server={server}
+                onServerUpdated={onServerUpdated}
+              />
+            )}
+          </>
         )}
       </div>
 

@@ -1,20 +1,54 @@
-export type GameType = 'minecraft';
+export type GameType = 'minecraft' | 'gmod';
 
 export type MinecraftLoader = 'vanilla' | 'fabric' | 'forge' | 'neoforge' | 'quilt' | 'paper' | 'purpur';
+
+export interface GModServerConfig {
+  gamemode: string;
+  defaultMap: string;
+  maxPlayers: number;
+  tickrate: number;
+  workshopCollectionId?: string;
+  steamApiKey?: string;
+  rconPassword?: string;
+  serverPassword?: string;
+}
+
+export interface GModAddonInfo {
+  name: string;
+  fileName: string;
+  filePath: string;
+  isFolder: boolean;
+  enabled: boolean;
+  sizeBytes: number;
+}
+
+export interface CreateGModServerOptions {
+  server: ServerInstance;
+  gamemode: string;
+  defaultMap: string;
+  maxPlayers: number;
+  tickrate: number;
+  workshopCollectionId?: string;
+  steamApiKey?: string;
+}
 
 export interface ServerInstance {
   id: string;
   name: string;
   game: GameType;
   path: string;
-  version: string;
-  loader: MinecraftLoader;
+  // Minecraft specific
+  version?: string;
+  loader?: MinecraftLoader;
   loaderVersion?: string;
-  port: number;
-  ramMin: number; // In GB
-  ramMax: number; // In GB
+  ramMin?: number; // In GB
+  ramMax?: number; // In GB
   javaPath?: string;
   jvmArgs?: string;
+  // GMod specific
+  gmodConfig?: GModServerConfig;
+
+  port: number;
   status: 'stopped' | 'starting' | 'running' | 'stopping';
   createdAt: number;
 }

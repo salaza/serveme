@@ -89,7 +89,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
                 <div className="flex items-center justify-between text-[11px] text-slate-400">
                   <span className="capitalize text-slate-400 font-mono text-[10px]">
-                    {srv.loader} {srv.version}
+                    {srv.game === 'gmod' ? `GMod • ${srv.gmodConfig?.gamemode || 'sandbox'}` : `${srv.loader} ${srv.version}`}
                   </span>
                   <span className="text-[10px] text-slate-500 font-mono">
                     :{srv.port}
