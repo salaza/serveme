@@ -1,0 +1,46 @@
+{
+  "name": "game-server-builder",
+  "version": "1.0.0",
+  "description": "Dedicated Game Server Builder & Manager with Mod and Config Support",
+  "main": "dist-electron/electron/main.js",
+  "scripts": {
+    "dev": "concurrently -k \"vite\" \"wait-on tcp:5173 && cross-env NODE_ENV=development electron .\"",
+    "start": "cross-env NODE_ENV=production electron .",
+    "build:electron": "tsc -p tsconfig.electron.json",
+    "build:vite": "vite build",
+    "build": "npm run build:vite && npm run build:electron",
+    "preview": "vite preview"
+  },
+  "keywords": [
+    "minecraft",
+    "dedicated-server",
+    "fabric",
+    "forge",
+    "modrinth",
+    "curseforge"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^22.13.1",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.4.20",
+    "concurrently": "^9.1.2",
+    "cross-env": "^7.0.3",
+    "electron": "^34.2.0",
+    "postcss": "^8.5.1",
+    "tailwindcss": "^3.4.17",
+    "typescript": "^5.7.3",
+    "vite": "^6.1.0",
+    "wait-on": "^8.0.2"
+  },
+  "dependencies": {
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.475.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "tailwind-merge": "^3.0.1"
+  }
+}

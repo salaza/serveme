@@ -1,0 +1,27 @@
+# Dependencies
+node_modules
+.pnp
+.pnp.js
+
+# Production build outputs
+dist
+dist-electron
+
+# Local logs & dev caches
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.eslintcache
+.vite
+
+# Environment & OS
+.env
+.env.local
+.DS_Store
+Thumbs.db
+
+# User data & temporary server files
+*.tmp
+servers.json
+settings.json
