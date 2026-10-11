@@ -479,7 +479,21 @@ export const CreateServerModal: React.FC<CreateServerModalProps> = ({
                   <label className="block text-xs font-semibold text-slate-300 mb-1.5">Gamemode</label>
                   <select
                     value={gmodGamemode}
-                    onChange={(e) => setGmodGamemode(e.target.value)}
+                    onChange={(e) => {
+                      const newMode = e.target.value;
+                      setGmodGamemode(newMode);
+                      const presets: Record<string, string[]> = {
+                        sandbox: ['gm_construct', 'gm_flatgrass', 'gm_bigcity'],
+                        darkrp: ['rp_downtown_v4c_v2', 'rp_southside', 'rp_evocity_v33x'],
+                        terrortown: ['ttt_minecraft_b5', 'ttt_cluedo_b5', 'ttt_rooftops_a2_f1'],
+                        prop_hunt: ['ph_office', 'ph_resort', 'ph_abandoned_mall'],
+                        murder: ['mu_cluedo', 'mu_resort', 'mu_autumn'],
+                        cinema: ['cinema_theatron', 'cinema_mats']
+                      };
+                      if (presets[newMode]) {
+                        setGmodDefaultMap(presets[newMode][0]);
+                      }
+                    }}
                     disabled={isInstalling}
                     className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-blue-500 font-mono"
                   >
@@ -502,6 +516,33 @@ export const CreateServerModal: React.FC<CreateServerModalProps> = ({
                     className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-blue-500 font-mono"
                     placeholder="gm_construct"
                   />
+                  <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
+                    <span className="text-[10px] text-slate-500">Popular:</span>
+                    {((gmodGamemode === 'darkrp'
+                      ? ['rp_downtown_v4c_v2', 'rp_southside', 'rp_evocity_v33x']
+                      : gmodGamemode === 'terrortown'
+                      ? ['ttt_minecraft_b5', 'ttt_cluedo_b5', 'ttt_rooftops_a2_f1']
+                      : gmodGamemode === 'prop_hunt'
+                      ? ['ph_office', 'ph_resort', 'ph_abandoned_mall']
+                      : gmodGamemode === 'murder'
+                      ? ['mu_cluedo', 'mu_resort', 'mu_autumn']
+                      : gmodGamemode === 'cinema'
+                      ? ['cinema_theatron', 'cinema_mats']
+                      : ['gm_construct', 'gm_flatgrass', 'gm_bigcity']) as string[]).map((mapName) => (
+                      <button
+                        key={mapName}
+                        type="button"
+                        onClick={() => setGmodDefaultMap(mapName)}
+                        className={`text-[10px] px-1.5 py-0.5 rounded font-mono transition border ${
+                          gmodDefaultMap === mapName
+                            ? 'bg-blue-600/30 text-blue-300 border-blue-500/40 font-semibold'
+                            : 'bg-slate-900 text-slate-400 hover:text-slate-200 border-slate-800'
+                        }`}
+                      >
+                        {mapName}
+                      </button>
+                    ))}
+                  </div>
                 </div>
 
                 <div>
