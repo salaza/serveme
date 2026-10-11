@@ -18,6 +18,9 @@ import {
   AlertCircle
 } from 'lucide-react';
 
+import { PortCheckResult } from '../types';
+import { PortWarningModal } from './PortWarningModal';
+
 interface ServerDashboardProps {
   server: ServerInstance;
   settings: AppSettings;
@@ -34,10 +37,32 @@ export const ServerDashboard: React.FC<ServerDashboardProps> = ({
   const [activeTab, setActiveTab] = useState<'console' | 'mods' | 'config'>('console');
   const [isStarting, setIsStarting] = useState(false);
   const [isStopping, setIsStopping] = useState(false);
+  const [isCheckingPort, setIsCheckingPort] = useState(false);
+  const [portWarningResult, setPortWarningResult] = useState<PortCheckResult | null>(null);
+  const [isPortModalOpen, setIsPortModalOpen] = useState(false);
 
   const isRunning = server.status === 'running';
 
-  const handleStart = async () => {
+  const initiateStart = async () => {
+    setIsCheckingPort(true);
+    try {
+      const check = await window.electronAPI.checkPort(server.port);
+      if (!check.isOpen) {
+        setPortWarningResult(check);
+        setIsPortModalOpen(true);
+        return;
+      }
+    } catch (err) {
+      console.warn('Port check skipped:', err);
+    } finally {
+      setIsCheckingPort(false);
+    }
+
+    await executeStart();
+  };
+
+  const executeStart = async () => {
+    setIsPortModalOpen(false);
     setIsStarting(true);
     try {
       const res = await window.electronAPI.startServer(server.id);
@@ -130,12 +155,12 @@ export const ServerDashboard: React.FC<ServerDashboardProps> = ({
             </button>
           ) : (
             <button
-              onClick={handleStart}
-              disabled={isStarting}
+              onClick={initiateStart}
+              disabled={isStarting || isCheckingPort}
               className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-semibold flex items-center gap-2 transition shadow-md shadow-emerald-950/40 disabled:opacity-50"
             >
               <Play className="w-3.5 h-3.5 fill-current" />
-              <span>{isStarting ? 'Starting...' : 'Start Server'}</span>
+              <span>{isCheckingPort ? 'Checking Port...' : isStarting ? 'Starting...' : 'Start Server'}</span>
             </button>
           )}
 
@@ -209,9 +234,9 @@ export const ServerDashboard: React.FC<ServerDashboardProps> = ({
         {activeTab === 'console' && (
           <ConsoleTab
             server={server}
-            onStart={handleStart}
+            onStart={initiateStart}
             onStop={handleStop}
-            isStarting={isStarting}
+            isStarting={isStarting || isCheckingPort}
             isStopping={isStopping}
           />
         )}
@@ -228,6 +253,15 @@ export const ServerDashboard: React.FC<ServerDashboardProps> = ({
           />
         )}
       </div>
+
+      {/* Port Forwarding Warning Modal */}
+      <PortWarningModal
+        isOpen={isPortModalOpen}
+        onClose={() => setIsPortModalOpen(false)}
+        onLaunchAnyway={executeStart}
+        portResult={portWarningResult}
+        serverName={server.name}
+      />
     </div>
   );
 };

@@ -89,3 +89,13 @@ export interface SystemInfo {
   totalMemoryGb: number;
   freeMemoryGb: number;
 }
+
+export interface PortCheckResult {
+  port: number;
+  isOpen: boolean;
+  isLocalPortFree: boolean;
+  gatewayIp: string;
+  localIp: string;
+  publicIp?: string;
+  message?: string;
+}

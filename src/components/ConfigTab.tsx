@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { ServerInstance } from '../types';
-import { Sliders, Save, FileCode, CheckCircle2, HardDrive, Cpu, Shield, Globe } from 'lucide-react';
+import { ServerInstance, PortCheckResult } from '../types';
+import { Sliders, Save, FileCode, CheckCircle2, HardDrive, Cpu, Shield, Globe, Network, Loader2 } from 'lucide-react';
+import { PortWarningModal } from './PortWarningModal';
 
 interface ConfigTabProps {
   server: ServerInstance;
@@ -17,6 +18,10 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({ server, onServerUpdated })
   const [javaPath, setJavaPath] = useState(server.javaPath || 'java');
   const [savedSuccess, setSavedSuccess] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [isTestingPort, setIsTestingPort] = useState(false);
+  const [portCheckResult, setPortCheckResult] = useState<PortCheckResult | null>(null);
+  const [isPortModalOpen, setIsPortModalOpen] = useState(false);
+  const [portTestSuccess, setPortTestSuccess] = useState<boolean | null>(null);
 
   useEffect(() => {
     loadProperties();
@@ -71,6 +76,26 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({ server, onServerUpdated })
       console.error('Failed to save config:', err);
     } finally {
       setIsSaving(false);
+    }
+  };
+
+  const handleTestPort = async () => {
+    const port = parseInt(properties['server-port'] || '25565') || 25565;
+    setIsTestingPort(true);
+    setPortTestSuccess(null);
+    try {
+      const res = await window.electronAPI.checkPort(port);
+      setPortCheckResult(res);
+      if (!res.isOpen) {
+        setIsPortModalOpen(true);
+      } else {
+        setPortTestSuccess(true);
+        setTimeout(() => setPortTestSuccess(null), 3000);
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setIsTestingPort(false);
     }
   };
 
@@ -192,7 +217,32 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({ server, onServerUpdated })
             </div>
 
             <div>
-              <label className="block text-xs font-semibold text-slate-300 mb-1">Server Port</label>
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-xs font-semibold text-slate-300">Server Port</label>
+                <button
+                  type="button"
+                  onClick={handleTestPort}
+                  disabled={isTestingPort}
+                  className="text-[11px] text-emerald-400 hover:text-emerald-300 flex items-center gap-1 font-medium transition disabled:opacity-50"
+                >
+                  {isTestingPort ? (
+                    <>
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                      <span>Testing Port...</span>
+                    </>
+                  ) : portTestSuccess ? (
+                    <>
+                      <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                      <span>Port Open!</span>
+                    </>
+                  ) : (
+                    <>
+                      <Network className="w-3 h-3" />
+                      <span>Test Port Forwarding</span>
+                    </>
+                  )}
+                </button>
+              </div>
               <input
                 type="number"
                 value={properties['server-port'] || '25565'}
@@ -376,6 +426,15 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({ server, onServerUpdated })
           </div>
         )}
       </div>
+
+      {/* Port Forwarding Warning Modal */}
+      <PortWarningModal
+        isOpen={isPortModalOpen}
+        onClose={() => setIsPortModalOpen(false)}
+        onLaunchAnyway={() => setIsPortModalOpen(false)}
+        portResult={portCheckResult}
+        serverName={server.name}
+      />
     </div>
   );
 };

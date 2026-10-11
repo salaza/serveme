@@ -4,7 +4,8 @@ import fs from 'fs';
 import { spawn, execSync, ChildProcess } from 'child_process';
 import http from 'http';
 import https from 'https';
-import { ServerInstance, AppSettings, ModlistFile } from '../src/types';
+import net from 'net';
+import { ServerInstance, AppSettings, ModlistFile, PortCheckResult } from '../src/types';
 
 let mainWindow: BrowserWindow | null = null;
 const runningProcesses = new Map<string, ChildProcess>();
@@ -625,3 +626,137 @@ ipcMain.handle('system:detectJava', async () => {
 
   return javaList;
 });
+
+// Network & Router Gateway Detection
+function getNetworkGatewayInfo(): { gatewayIp: string; localIp: string } {
+  let gatewayIp = '192.168.1.1';
+  let localIp = '127.0.0.1';
+
+  try {
+    const out = execSync('ipconfig', { encoding: 'utf-8' });
+    const sections = out.split(/\r?\n\r?\n/);
+    for (const section of sections) {
+      const gwMatch = section.match(/(?:Standardgateway|Default Gateway)[\s\.:]+(\d+\.\d+\.\d+\.\d+)/i);
+      const ipMatch = section.match(/(?:IPv4-Adresse|IPv4 Address)[\s\.:]+(\d+\.\d+\.\d+\.\d+)/i);
+      if (gwMatch && ipMatch && gwMatch[1] !== '0.0.0.0') {
+        gatewayIp = gwMatch[1];
+        localIp = ipMatch[1];
+        break;
+      }
+    }
+  } catch (err) {
+    console.warn('Failed to detect gateway from ipconfig:', err);
+  }
+
+  return { gatewayIp, localIp };
+}
+
+ipcMain.handle('network:checkPort', async (_, port: number): Promise<PortCheckResult> => {
+  const { gatewayIp, localIp } = getNetworkGatewayInfo();
+
+  // 1. Check if the port is already bound locally
+  const isLocalPortFree = await new Promise<boolean>((resolve) => {
+    const tester = net.createServer();
+    tester.once('error', (err: any) => {
+      if (err.code === 'EADDRINUSE') {
+        resolve(false);
+      } else {
+        resolve(true);
+      }
+    });
+    tester.once('listening', () => {
+      tester.close(() => resolve(true));
+    });
+    tester.listen(port, '0.0.0.0');
+  });
+
+  if (!isLocalPortFree) {
+    return {
+      port,
+      isOpen: false,
+      isLocalPortFree: false,
+      gatewayIp,
+      localIp,
+      message: `Port ${port} is already in use by another program on this computer.`
+    };
+  }
+
+  // 2. Start a temporary lightweight listener to test external port accessibility
+  const tempServer = net.createServer((socket) => {
+    socket.end('PING');
+  });
+
+  let tempBound = false;
+  try {
+    await new Promise<void>((resolve, reject) => {
+      tempServer.listen(port, '0.0.0.0', () => {
+        tempBound = true;
+        resolve();
+      });
+      tempServer.on('error', reject);
+    });
+  } catch {
+    return {
+      port,
+      isOpen: false,
+      isLocalPortFree: false,
+      gatewayIp,
+      localIp,
+      message: `Could not bind port ${port} locally for testing.`
+    };
+  }
+
+  let isOpen = false;
+  let publicIp = '';
+
+  try {
+    // Fetch public IP with 3.5s timeout
+    const ipCtrl = new AbortController();
+    const ipTimeout = setTimeout(() => ipCtrl.abort(), 3500);
+    const ipRes = await fetch('https://api.ipify.org?format=json', { signal: ipCtrl.signal });
+    clearTimeout(ipTimeout);
+
+    if (ipRes.ok) {
+      const ipData = await ipRes.json();
+      publicIp = ipData.ip;
+
+      // Test external reachability via public check
+      const mcCtrl = new AbortController();
+      const mcTimeout = setTimeout(() => mcCtrl.abort(), 3500);
+      const checkRes = await fetch(`https://api.mcstatus.io/v2/status/java/${publicIp}:${port}`, {
+        signal: mcCtrl.signal
+      });
+      clearTimeout(mcTimeout);
+
+      if (checkRes.ok) {
+        const checkData = await checkRes.json();
+        // If the service saw a response from this port
+        if (checkData.online) {
+          isOpen = true;
+        }
+      }
+    }
+  } catch (err) {
+    // Port closed or probe timed out (not forwarded)
+    isOpen = false;
+  } finally {
+    if (tempBound) {
+      await new Promise<void>((resolve) => tempServer.close(() => resolve()));
+    }
+  }
+
+  return {
+    port,
+    isOpen,
+    isLocalPortFree: true,
+    gatewayIp,
+    localIp,
+    publicIp
+  };
+});
+
+ipcMain.handle('network:openRouter', async (_, gatewayIp: string) => {
+  const url = gatewayIp.startsWith('http') ? gatewayIp : `http://${gatewayIp}`;
+  await shell.openExternal(url);
+});
+

@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import { ServerInstance, ModlistFile, AppSettings } from '../src/types';
+import { ServerInstance, ModlistFile, AppSettings, PortCheckResult } from '../src/types';
 
 export const electronAPI = {
   // Server management
@@ -79,7 +79,13 @@ export const electronAPI = {
   getSettings: (): Promise<AppSettings> => ipcRenderer.invoke('settings:get'),
   saveSettings: (settings: AppSettings): Promise<void> => ipcRenderer.invoke('settings:save', settings),
   detectJava: (): Promise<Array<{ path: string; version: string; isDefault: boolean }>> =>
-    ipcRenderer.invoke('system:detectJava')
+    ipcRenderer.invoke('system:detectJava'),
+
+  // Network & Router Gateway
+  checkPort: (port: number): Promise<PortCheckResult> =>
+    ipcRenderer.invoke('network:checkPort', port),
+  openRouterSettings: (gatewayIp: string): Promise<void> =>
+    ipcRenderer.invoke('network:openRouter', gatewayIp)
 };
 
 contextBridge.exposeInMainWorld('electronAPI', electronAPI);
