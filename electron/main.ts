@@ -319,6 +319,15 @@ ipcMain.handle('server:start', async (_, serverId: string) => {
     `-Xmx${server.ramMax}G`
   ];
 
+  // Modern Java (22+) restricted methods warning suppression for JNA/Fabric
+  try {
+    const rawJavaVer = execSync(`"${javaExec}" -version 2>&1`, { encoding: 'utf-8' });
+    const major = parseJavaMajor(rawJavaVer);
+    if (major >= 22) {
+      args.push('--enable-native-access=ALL-UNNAMED');
+    }
+  } catch {}
+
   if (server.jvmArgs && server.jvmArgs.trim()) {
     args.push(...server.jvmArgs.trim().split(/\s+/));
   }
