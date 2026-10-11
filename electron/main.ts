@@ -10,6 +10,15 @@ import { ServerInstance, AppSettings, ModlistFile, PortCheckResult, JavaVersionI
 let mainWindow: BrowserWindow | null = null;
 const runningProcesses = new Map<string, ChildProcess>();
 
+// Global exception safety against transient network socket drops
+process.on('uncaughtException', (err: any) => {
+  if (err && (err.code === 'ECONNRESET' || err.code === 'EPIPE' || err.code === 'ETIMEDOUT' || err.message?.includes('ECONNRESET'))) {
+    console.warn('Caught transient network socket drop in main process:', err.message);
+    return;
+  }
+  console.error('Uncaught Exception in main process:', err);
+});
+
 // Storage paths
 const userDataPath = app.getPath('userData');
 const serversConfigFile = path.join(userDataPath, 'servers.json');
@@ -841,9 +850,28 @@ ipcMain.handle('network:checkPort', async (_, args: number | { port: number; ser
 
   // Server is not running: start a temporary listener to see if incoming traffic hits THIS computer
   let incomingProbeHit = false;
+  const activeSockets = new Set<net.Socket>();
+
   const tempServer = net.createServer((socket) => {
     incomingProbeHit = true;
-    socket.end('MC_PORT_CHECK\n');
+    activeSockets.add(socket);
+
+    // CRITICAL: Attach error handler to prevent unhandled ECONNRESET when scanner closes socket
+    socket.on('error', () => {
+      // Ignore client abort / ECONNRESET
+    });
+
+    socket.on('close', () => {
+      activeSockets.delete(socket);
+    });
+
+    try {
+      socket.end('MC_PORT_CHECK\n');
+    } catch {}
+  });
+
+  tempServer.on('error', (err) => {
+    console.warn('tempServer socket error:', err);
   });
 
   let tempBound = false;
@@ -901,6 +929,12 @@ ipcMain.handle('network:checkPort', async (_, args: number | { port: number; ser
     isOpen = false;
   } finally {
     if (tempBound) {
+      for (const sock of activeSockets) {
+        try {
+          sock.destroy();
+        } catch {}
+      }
+      activeSockets.clear();
       await new Promise<void>((resolve) => tempServer.close(() => resolve()));
     }
   }
