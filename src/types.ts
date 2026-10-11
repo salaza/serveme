@@ -1,6 +1,6 @@
 export type GameType = 'minecraft';
 
-export type MinecraftLoader = 'vanilla' | 'fabric' | 'forge' | 'neoforge' | 'paper' | 'purpur';
+export type MinecraftLoader = 'vanilla' | 'fabric' | 'forge' | 'neoforge' | 'quilt' | 'paper' | 'purpur';
 
 export interface ServerInstance {
   id: string;
@@ -151,5 +151,42 @@ export interface CreateWorldOptions {
 export interface RegenerateWorldOptions {
   createBackupFirst: boolean;
   newSeed?: string;
+}
+
+export interface ClientModToDownload {
+  id: string;
+  name: string;
+  fileName: string;
+  downloadUrl: string;
+  fileSize?: number;
+  iconUrl?: string;
+  provider: 'modrinth' | 'curseforge';
+}
+
+export interface LocalClientMod {
+  path: string;
+  name: string;
+  fileName: string;
+  fileSize: number;
+}
+
+export interface ExportModpackOptions {
+  serverId: string;
+  packName: string;
+  packVersion: string;
+  packAuthor?: string;
+  packNotes?: string;
+  includeConfigs: boolean;
+  selectedServerModFiles: string[];
+  clientModsToDownload: ClientModToDownload[];
+  localClientModPaths: string[];
+  outputPath: string;
+}
+
+export interface ExportModpackResult {
+  success: boolean;
+  outputPath?: string;
+  error?: string;
+  modsCount?: number;
 }
 

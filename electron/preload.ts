@@ -9,7 +9,10 @@ import {
   WorldInfo,
   WorldBackup,
   CreateWorldOptions,
-  RegenerateWorldOptions
+  RegenerateWorldOptions,
+  ExportModpackOptions,
+  ExportModpackResult,
+  LocalClientMod
 } from '../src/types';
 
 export const electronAPI = {
@@ -123,7 +126,17 @@ export const electronAPI = {
   restoreWorldBackup: (serverPath: string, backupFileName: string, targetWorldName?: string): Promise<{ success: boolean; error?: string }> =>
     ipcRenderer.invoke('worlds:restoreBackup', { serverPath, backupFileName, targetWorldName }),
   deleteWorldBackup: (serverPath: string, backupFileName: string): Promise<boolean> =>
-    ipcRenderer.invoke('worlds:deleteBackup', { serverPath, backupFileName })
+    ipcRenderer.invoke('worlds:deleteBackup', { serverPath, backupFileName }),
+
+  // Modpack Export (Prism / MultiMC)
+  saveZipFileDialog: (defaultName: string): Promise<string | null> =>
+    ipcRenderer.invoke('dialog:saveZipFile', { defaultName }),
+  selectJarFiles: (): Promise<LocalClientMod[]> =>
+    ipcRenderer.invoke('dialog:selectJarFiles'),
+  exportModpack: (options: ExportModpackOptions): Promise<ExportModpackResult> =>
+    ipcRenderer.invoke('modpack:export', options),
+  showItemInFolder: (filePath: string): Promise<void> =>
+    ipcRenderer.invoke('shell:showItemInFolder', filePath)
 };
 
 contextBridge.exposeInMainWorld('electronAPI', electronAPI);

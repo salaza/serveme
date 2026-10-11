@@ -14,9 +14,11 @@ import {
   FileJson,
   Loader2,
   RefreshCw,
-  AlertCircle
+  AlertCircle,
+  FileArchive
 } from 'lucide-react';
 import { getModrinthProjectVersions } from '../services/mod-providers/modrinth';
+import { ExportModpackModal } from './ExportModpackModal';
 
 interface ModsTabProps {
   server: ServerInstance;
@@ -28,6 +30,7 @@ export const ModsTab: React.FC<ModsTabProps> = ({ server, settings }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isBrowserOpen, setIsBrowserOpen] = useState(false);
+  const [isExportModpackOpen, setIsExportModpackOpen] = useState(false);
   const [message, setMessage] = useState<{ text: string; type: 'success' | 'error' | 'info' } | null>(null);
 
   // Batch import progress state
@@ -202,6 +205,15 @@ export const ModsTab: React.FC<ModsTabProps> = ({ server, settings }) => {
           </button>
 
           <button
+            onClick={() => setIsExportModpackOpen(true)}
+            className="px-3 py-1.5 bg-gradient-to-r from-emerald-600/90 to-teal-600/90 hover:from-emerald-500 hover:to-teal-500 text-white text-xs font-semibold rounded-lg transition flex items-center gap-1.5 shadow-md shadow-emerald-950/30 border border-emerald-500/30"
+            title="Generate Prism Launcher / MultiMC importable ZIP with client mods"
+          >
+            <FileArchive className="w-3.5 h-3.5 text-emerald-200" />
+            <span>Export Modpack (Prism / MultiMC)</span>
+          </button>
+
+          <button
             onClick={handleOpenModsFolder}
             className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium rounded-lg transition flex items-center gap-1.5 border border-slate-700"
           >
@@ -343,6 +355,15 @@ export const ModsTab: React.FC<ModsTabProps> = ({ server, settings }) => {
         server={server}
         settings={settings}
         onModInstalled={fetchMods}
+      />
+
+      {/* Export Modpack Modal */}
+      <ExportModpackModal
+        isOpen={isExportModpackOpen}
+        onClose={() => setIsExportModpackOpen(false)}
+        server={server}
+        installedMods={mods}
+        settings={settings}
       />
     </div>
   );

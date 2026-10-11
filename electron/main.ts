@@ -6,7 +6,21 @@ import http from 'http';
 import https from 'https';
 import net from 'net';
 import AdmZip from 'adm-zip';
-import { ServerInstance, AppSettings, ModlistFile, PortCheckResult, JavaVersionInfo, JavaValidationResult, WorldInfo, WorldBackup, CreateWorldOptions, RegenerateWorldOptions } from '../src/types';
+import {
+  ServerInstance,
+  AppSettings,
+  ModlistFile,
+  PortCheckResult,
+  JavaVersionInfo,
+  JavaValidationResult,
+  WorldInfo,
+  WorldBackup,
+  CreateWorldOptions,
+  RegenerateWorldOptions,
+  ExportModpackOptions,
+  ExportModpackResult,
+  LocalClientMod
+} from '../src/types';
 
 let mainWindow: BrowserWindow | null = null;
 const runningProcesses = new Map<string, ChildProcess>();
@@ -544,6 +558,215 @@ ipcMain.handle('modlist:import', async () => {
   }
 });
 
+// Modpack Export (Prism Launcher & MultiMC instance format)
+ipcMain.handle('dialog:saveZipFile', async (_, { defaultName }: { defaultName?: string }) => {
+  if (!mainWindow) return null;
+  const defaultDir = app.getPath('documents');
+  const defaultPath = path.join(defaultDir, defaultName || 'modpack.zip');
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: 'Export Modpack for Prism / MultiMC',
+    defaultPath,
+    filters: [{ name: 'ZIP Modpack Archive', extensions: ['zip'] }]
+  });
+  if (result.canceled || !result.filePath) return null;
+  return result.filePath;
+});
+
+ipcMain.handle('dialog:selectJarFiles', async () => {
+  if (!mainWindow) return [];
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Select Client Mods (.jar)',
+    properties: ['openFile', 'multiSelections'],
+    filters: [{ name: 'Minecraft Mod JARs', extensions: ['jar'] }]
+  });
+  if (result.canceled || result.filePaths.length === 0) return [];
+
+  return result.filePaths.map(filePath => {
+    const fileName = path.basename(filePath);
+    try {
+      const stat = fs.statSync(filePath);
+      return {
+        path: filePath,
+        fileName,
+        name: fileName.replace(/\.jar$/i, ''),
+        fileSize: stat.size
+      };
+    } catch {
+      return {
+        path: filePath,
+        fileName,
+        name: fileName.replace(/\.jar$/i, ''),
+        fileSize: 0
+      };
+    }
+  });
+});
+
+ipcMain.handle('modpack:export', async (_, options: ExportModpackOptions): Promise<ExportModpackResult> => {
+  try {
+    const servers = loadServers();
+    const server = servers.find(s => s.id === options.serverId);
+    if (!server) {
+      return { success: false, error: 'Server not found' };
+    }
+
+    if (!fs.existsSync(server.path)) {
+      return { success: false, error: 'Server directory does not exist' };
+    }
+
+    const zip = new AdmZip();
+
+    // 1. instance.cfg (MultiMC / Prism Launcher instance configuration)
+    const sanitizedNotes = (options.packNotes || `Exported from Game Server Builder`)
+      .replace(/\r?\n/g, '\\n');
+    const instanceCfg = [
+      'InstanceType=OneSix',
+      'iconKey=default',
+      `name=${options.packName || server.name}`,
+      `notes=${sanitizedNotes}`,
+      `IntendedVersion=${server.version}`
+    ].join('\n') + '\n';
+    zip.addFile('instance.cfg', Buffer.from(instanceCfg, 'utf-8'));
+
+    // 2. mmc-pack.json (Components manifest)
+    const components: any[] = [
+      {
+        cachedName: 'Minecraft',
+        important: true,
+        uid: 'net.minecraft',
+        version: server.version
+      }
+    ];
+
+    if (server.loader && server.loader !== 'vanilla') {
+      const loaderVersion = server.loaderVersion || '0.15.11';
+      if (server.loader === 'fabric') {
+        components.push({
+          cachedName: 'Fabric Loader',
+          important: true,
+          uid: 'net.fabricmc.fabric-loader',
+          version: loaderVersion
+        });
+      } else if (server.loader === 'forge') {
+        components.push({
+          cachedName: 'Forge',
+          important: true,
+          uid: 'net.minecraftforge',
+          version: loaderVersion
+        });
+      } else if (server.loader === 'neoforge') {
+        components.push({
+          cachedName: 'NeoForge',
+          important: true,
+          uid: 'net.neoforged',
+          version: loaderVersion
+        });
+      } else if (server.loader === 'quilt') {
+        components.push({
+          cachedName: 'Quilt Loader',
+          important: true,
+          uid: 'org.quiltmc.quilt-loader',
+          version: loaderVersion
+        });
+      }
+    }
+
+    const mmcPack = {
+      formatVersion: 1,
+      components
+    };
+    zip.addFile('mmc-pack.json', Buffer.from(JSON.stringify(mmcPack, null, 2), 'utf-8'));
+
+    let totalMods = 0;
+    const addedFileNames = new Set<string>();
+
+    // 3. Server Mods
+    const serverModsDir = path.join(server.path, 'mods');
+    if (fs.existsSync(serverModsDir)) {
+      for (const modFile of options.selectedServerModFiles) {
+        const fullModPath = path.join(serverModsDir, modFile);
+        if (fs.existsSync(fullModPath)) {
+          const targetName = modFile.replace(/\.disabled$/, '');
+          zip.addLocalFile(fullModPath, '.minecraft/mods', targetName);
+          addedFileNames.add(targetName.toLowerCase());
+          totalMods++;
+        }
+      }
+    }
+
+    // 4. Client Mods downloaded from Modrinth / CurseForge
+    if (options.clientModsToDownload && options.clientModsToDownload.length > 0) {
+      const tempDir = path.join(app.getPath('temp'), `gsb-client-mods-${Date.now()}`);
+      if (!fs.existsSync(tempDir)) {
+        fs.mkdirSync(tempDir, { recursive: true });
+      }
+
+      try {
+        for (const clientMod of options.clientModsToDownload) {
+          if (!clientMod.downloadUrl) continue;
+          const fileName = clientMod.fileName || `${clientMod.name}.jar`;
+          if (addedFileNames.has(fileName.toLowerCase())) continue;
+
+          const tempDest = path.join(tempDir, fileName);
+          await downloadFile(clientMod.downloadUrl, tempDest);
+
+          if (fs.existsSync(tempDest)) {
+            zip.addLocalFile(tempDest, '.minecraft/mods', fileName);
+            addedFileNames.add(fileName.toLowerCase());
+            totalMods++;
+          }
+        }
+      } finally {
+        try {
+          fs.rmSync(tempDir, { recursive: true, force: true });
+        } catch {}
+      }
+    }
+
+    // 5. Local Client Mods provided by user
+    if (options.localClientModPaths && options.localClientModPaths.length > 0) {
+      for (const localModPath of options.localClientModPaths) {
+        if (fs.existsSync(localModPath)) {
+          const fileName = path.basename(localModPath);
+          if (!addedFileNames.has(fileName.toLowerCase())) {
+            zip.addLocalFile(localModPath, '.minecraft/mods', fileName);
+            addedFileNames.add(fileName.toLowerCase());
+            totalMods++;
+          }
+        }
+      }
+    }
+
+    // 6. Include Server configs if requested
+    if (options.includeConfigs) {
+      const configDir = path.join(server.path, 'config');
+      if (fs.existsSync(configDir)) {
+        zip.addLocalFolder(configDir, '.minecraft/config');
+      }
+    }
+
+    // 7. Write ZIP
+    const outDir = path.dirname(options.outputPath);
+    if (!fs.existsSync(outDir)) {
+      fs.mkdirSync(outDir, { recursive: true });
+    }
+
+    zip.writeZip(options.outputPath);
+
+    return {
+      success: true,
+      outputPath: options.outputPath,
+      modsCount: totalMods
+    };
+  } catch (err: any) {
+    console.error('Failed to export modpack:', err);
+    return {
+      success: false,
+      error: err.message || 'Unknown error exporting modpack'
+    };
+  }
+});
+
 // Config: server.properties
 ipcMain.handle('config:readProperties', async (_, serverPath: string) => {
   const propsPath = path.join(serverPath, 'server.properties');
@@ -592,6 +815,10 @@ ipcMain.handle('files:writeRaw', async (_, { filePath, content }: { filePath: st
 
 ipcMain.handle('shell:openPath', async (_, dirPath: string) => {
   await shell.openPath(dirPath);
+});
+
+ipcMain.handle('shell:showItemInFolder', async (_, filePath: string) => {
+  shell.showItemInFolder(filePath);
 });
 
 // Settings & System
