@@ -793,23 +793,73 @@ function getNetworkGatewayInfo(): { gatewayIp: string; localIp: string } {
   return { gatewayIp, localIp };
 }
 
-ipcMain.handle('network:checkPort', async (_, port: number): Promise<PortCheckResult> => {
+ipcMain.handle('network:checkPort', async (_, args: number | { port: number; serverId?: string }): Promise<PortCheckResult> => {
+  const port = typeof args === 'number' ? args : args.port;
+  const serverId = typeof args === 'object' ? args.serverId : undefined;
   const { gatewayIp, localIp } = getNetworkGatewayInfo();
 
-  // 1. Check if the port is already bound locally
-  const isLocalPortFree = await new Promise<boolean>((resolve) => {
-    const tester = net.createServer();
-    tester.once('error', (err: any) => {
+  let publicIp = '';
+  try {
+    const ipCtrl = new AbortController();
+    const ipTimeout = setTimeout(() => ipCtrl.abort(), 3000);
+    const ipRes = await fetch('https://api.ipify.org?format=json', { signal: ipCtrl.signal });
+    clearTimeout(ipTimeout);
+    if (ipRes.ok) {
+      const ipData = await ipRes.json();
+      publicIp = ipData.ip;
+    }
+  } catch {}
+
+  // If this server process is already running, check if it's reachable externally
+  if (serverId && runningProcesses.has(serverId)) {
+    let isExternalOnline = false;
+    if (publicIp) {
+      try {
+        const mcCtrl = new AbortController();
+        const mcTimeout = setTimeout(() => mcCtrl.abort(), 3500);
+        const checkRes = await fetch(`https://api.mcsrvstat.us/3/${publicIp}:${port}`, {
+          signal: mcCtrl.signal
+        });
+        clearTimeout(mcTimeout);
+        if (checkRes.ok) {
+          const checkData = await checkRes.json();
+          isExternalOnline = Boolean(checkData.online);
+        }
+      } catch {}
+    }
+
+    return {
+      port,
+      isOpen: isExternalOnline,
+      isLocalPortFree: true,
+      gatewayIp,
+      localIp,
+      publicIp,
+      message: isExternalOnline ? 'Server is reachable externally.' : `Port ${port} is not forwarded on router.`
+    };
+  }
+
+  // Server is not running: start a temporary listener to see if incoming traffic hits THIS computer
+  let incomingProbeHit = false;
+  const tempServer = net.createServer((socket) => {
+    incomingProbeHit = true;
+    socket.end('MC_PORT_CHECK\n');
+  });
+
+  let tempBound = false;
+  let isLocalPortFree = true;
+
+  await new Promise<void>((resolve) => {
+    tempServer.once('error', (err: any) => {
       if (err.code === 'EADDRINUSE') {
-        resolve(false);
-      } else {
-        resolve(true);
+        isLocalPortFree = false;
       }
+      resolve();
     });
-    tester.once('listening', () => {
-      tester.close(() => resolve(true));
+    tempServer.listen(port, '0.0.0.0', () => {
+      tempBound = true;
+      resolve();
     });
-    tester.listen(port, '0.0.0.0');
   });
 
   if (!isLocalPortFree) {
@@ -819,67 +869,35 @@ ipcMain.handle('network:checkPort', async (_, port: number): Promise<PortCheckRe
       isLocalPortFree: false,
       gatewayIp,
       localIp,
+      publicIp,
       message: `Port ${port} is already in use by another program on this computer.`
     };
   }
 
-  // 2. Start a temporary lightweight listener to test external port accessibility
-  const tempServer = net.createServer((socket) => {
-    socket.end('PING');
-  });
-
-  let tempBound = false;
-  try {
-    await new Promise<void>((resolve, reject) => {
-      tempServer.listen(port, '0.0.0.0', () => {
-        tempBound = true;
-        resolve();
-      });
-      tempServer.on('error', reject);
-    });
-  } catch {
-    return {
-      port,
-      isOpen: false,
-      isLocalPortFree: false,
-      gatewayIp,
-      localIp,
-      message: `Could not bind port ${port} locally for testing.`
-    };
-  }
-
   let isOpen = false;
-  let publicIp = '';
 
   try {
-    // Fetch public IP with 3.5s timeout
-    const ipCtrl = new AbortController();
-    const ipTimeout = setTimeout(() => ipCtrl.abort(), 3500);
-    const ipRes = await fetch('https://api.ipify.org?format=json', { signal: ipCtrl.signal });
-    clearTimeout(ipTimeout);
+    if (tempBound && publicIp) {
+      // Trigger external probe request to hit publicIp:port
+      const probeCtrl = new AbortController();
+      const probeTimeout = setTimeout(() => probeCtrl.abort(), 3500);
+      try {
+        await Promise.any([
+          fetch(`https://api.mcsrvstat.us/3/${publicIp}:${port}`, { signal: probeCtrl.signal }),
+          fetch(`https://api.mcstatus.io/v2/status/java/${publicIp}:${port}`, { signal: probeCtrl.signal })
+        ]);
+      } catch {}
+      clearTimeout(probeTimeout);
 
-    if (ipRes.ok) {
-      const ipData = await ipRes.json();
-      publicIp = ipData.ip;
-
-      // Test external reachability via public check
-      const mcCtrl = new AbortController();
-      const mcTimeout = setTimeout(() => mcCtrl.abort(), 3500);
-      const checkRes = await fetch(`https://api.mcstatus.io/v2/status/java/${publicIp}:${port}`, {
-        signal: mcCtrl.signal
-      });
-      clearTimeout(mcTimeout);
-
-      if (checkRes.ok) {
-        const checkData = await checkRes.json();
-        // If the service saw a response from this port
-        if (checkData.online) {
-          isOpen = true;
-        }
+      // Wait up to 1.8 seconds for incoming TCP packet to reach tempServer
+      const startWait = Date.now();
+      while (!incomingProbeHit && Date.now() - startWait < 1800) {
+        await new Promise((r) => setTimeout(r, 100));
       }
+
+      isOpen = incomingProbeHit;
     }
   } catch (err) {
-    // Port closed or probe timed out (not forwarded)
     isOpen = false;
   } finally {
     if (tempBound) {
@@ -893,7 +911,10 @@ ipcMain.handle('network:checkPort', async (_, port: number): Promise<PortCheckRe
     isLocalPortFree: true,
     gatewayIp,
     localIp,
-    publicIp
+    publicIp,
+    message: isOpen
+      ? `Port ${port} is open and forwarded to this PC.`
+      : `Port ${port} is not forwarded on router to ${localIp}.`
   };
 });
 

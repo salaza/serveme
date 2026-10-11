@@ -64,19 +64,28 @@ export const ServerDashboard: React.FC<ServerDashboardProps> = ({
 
       // 2. Check Port forwarding
       setIsCheckingPort(true);
+      let check: PortCheckResult | null = null;
       try {
-        const check = await window.electronAPI.checkPort(server.port);
-        if (!check.isOpen) {
-          setPortWarningResult(check);
-          setIsPortModalOpen(true);
-          setIsStarting(false);
-          setIsCheckingPort(false);
-          return;
-        }
+        let activePort = server.port;
+        try {
+          const props = await window.electronAPI.readServerProperties(server.path);
+          if (props['server-port']) {
+            activePort = parseInt(props['server-port'], 10) || server.port;
+          }
+        } catch {}
+
+        check = await window.electronAPI.checkPort(activePort, server.id);
       } catch (err) {
-        console.warn('Port check skipped:', err);
+        console.warn('Port check error:', err);
       } finally {
         setIsCheckingPort(false);
+      }
+
+      if (check && !check.isOpen) {
+        setPortWarningResult(check);
+        setIsPortModalOpen(true);
+        setIsStarting(false);
+        return;
       }
 
       await executeStart();
@@ -97,18 +106,27 @@ export const ServerDashboard: React.FC<ServerDashboardProps> = ({
 
     // Proceed with port check & launch
     setIsCheckingPort(true);
+    let check: PortCheckResult | null = null;
     try {
-      const check = await window.electronAPI.checkPort(server.port);
-      if (!check.isOpen) {
-        setPortWarningResult(check);
-        setIsPortModalOpen(true);
-        setIsCheckingPort(false);
-        return;
-      }
+      let activePort = updatedServer.port;
+      try {
+        const props = await window.electronAPI.readServerProperties(updatedServer.path);
+        if (props['server-port']) {
+          activePort = parseInt(props['server-port'], 10) || updatedServer.port;
+        }
+      } catch {}
+
+      check = await window.electronAPI.checkPort(activePort, updatedServer.id);
     } catch (err) {
-      console.warn('Port check skipped:', err);
+      console.warn('Port check error:', err);
     } finally {
       setIsCheckingPort(false);
+    }
+
+    if (check && !check.isOpen) {
+      setPortWarningResult(check);
+      setIsPortModalOpen(true);
+      return;
     }
 
     await executeStart();

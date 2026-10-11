@@ -86,8 +86,8 @@ export const electronAPI = {
     ipcRenderer.invoke('shell:openExternal', url),
 
   // Network & Router Gateway
-  checkPort: (port: number): Promise<PortCheckResult> =>
-    ipcRenderer.invoke('network:checkPort', port),
+  checkPort: (port: number, serverId?: string): Promise<PortCheckResult> =>
+    ipcRenderer.invoke('network:checkPort', { port, serverId }),
   openRouterSettings: (gatewayIp: string): Promise<void> =>
     ipcRenderer.invoke('network:openRouter', gatewayIp)
 };
