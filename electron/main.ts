@@ -5,7 +5,8 @@ import { spawn, execSync, ChildProcess } from 'child_process';
 import http from 'http';
 import https from 'https';
 import net from 'net';
-import { ServerInstance, AppSettings, ModlistFile, PortCheckResult, JavaVersionInfo, JavaValidationResult } from '../src/types';
+import AdmZip from 'adm-zip';
+import { ServerInstance, AppSettings, ModlistFile, PortCheckResult, JavaVersionInfo, JavaValidationResult, WorldInfo, WorldBackup, CreateWorldOptions, RegenerateWorldOptions } from '../src/types';
 
 let mainWindow: BrowserWindow | null = null;
 const runningProcesses = new Map<string, ChildProcess>();
@@ -956,4 +957,455 @@ ipcMain.handle('network:openRouter', async (_, gatewayIp: string) => {
   const url = gatewayIp.startsWith('http') ? gatewayIp : `http://${gatewayIp}`;
   await shell.openExternal(url);
 });
+
+// ==================== WORLDS & BACKUPS ====================
+
+function getDirectorySize(dirPath: string): number {
+  let size = 0;
+  try {
+    if (!fs.existsSync(dirPath)) return 0;
+    const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = path.join(dirPath, entry.name);
+      if (entry.isDirectory()) {
+        size += getDirectorySize(fullPath);
+      } else if (entry.isFile()) {
+        try {
+          size += fs.statSync(fullPath).size;
+        } catch {}
+      }
+    }
+  } catch {}
+  return size;
+}
+
+function copyDirectorySync(src: string, dest: string) {
+  if (!fs.existsSync(dest)) {
+    fs.mkdirSync(dest, { recursive: true });
+  }
+  const entries = fs.readdirSync(src, { withFileTypes: true });
+  for (const entry of entries) {
+    const srcPath = path.join(src, entry.name);
+    const destPath = path.join(dest, entry.name);
+    if (entry.isDirectory()) {
+      copyDirectorySync(srcPath, destPath);
+    } else if (entry.isFile()) {
+      fs.copyFileSync(srcPath, destPath);
+    }
+  }
+}
+
+function getActiveWorldName(serverPath: string): string {
+  const propsPath = path.join(serverPath, 'server.properties');
+  if (fs.existsSync(propsPath)) {
+    try {
+      const content = fs.readFileSync(propsPath, 'utf-8');
+      const match = content.match(/^level-name\s*=\s*(.+)$/m);
+      if (match && match[1].trim()) {
+        return match[1].trim();
+      }
+    } catch {}
+  }
+  return 'world';
+}
+
+function listWorldsInServer(serverPath: string): { activeWorld: string; worlds: WorldInfo[] } {
+  const activeWorld = getActiveWorldName(serverPath);
+  const foundWorlds: WorldInfo[] = [];
+  const seenNames = new Set<string>();
+
+  if (!fs.existsSync(serverPath)) {
+    return { activeWorld, worlds: [] };
+  }
+
+  const entries = fs.readdirSync(serverPath, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const name = entry.name;
+    const lower = name.toLowerCase();
+
+    // Skip known non-world directories
+    if (['mods', 'config', 'logs', 'crash-reports', 'backups', 'libraries', 'versions', '.fabric', '.cache'].includes(lower)) {
+      continue;
+    }
+    // Skip companion dimension folders directly (they belong to their parent world)
+    if (name.endsWith('_nether') || name.endsWith('_the_end')) {
+      continue;
+    }
+
+    const dirPath = path.join(serverPath, name);
+    const hasLevelDat = fs.existsSync(path.join(dirPath, 'level.dat'));
+    const hasRegion = fs.existsSync(path.join(dirPath, 'region'));
+    const isNamedActive = name === activeWorld;
+
+    if (hasLevelDat || hasRegion || isNamedActive) {
+      seenNames.add(name);
+      let sizeBytes = getDirectorySize(dirPath);
+      let mtime = 0;
+      try {
+        mtime = fs.statSync(dirPath).mtimeMs;
+      } catch {}
+
+      // Add nether/end companion sizes if Paper/Spigot style
+      const netherPath = path.join(serverPath, `${name}_nether`);
+      const hasNether = fs.existsSync(path.join(dirPath, 'DIM-1')) || fs.existsSync(netherPath);
+      if (fs.existsSync(netherPath)) {
+        sizeBytes += getDirectorySize(netherPath);
+      }
+
+      const endPath = path.join(serverPath, `${name}_the_end`);
+      const hasEnd = fs.existsSync(path.join(dirPath, 'DIM1')) || fs.existsSync(endPath);
+      if (fs.existsSync(endPath)) {
+        sizeBytes += getDirectorySize(endPath);
+      }
+
+      foundWorlds.push({
+        name,
+        isActive: name === activeWorld,
+        sizeBytes,
+        lastModified: mtime || Date.now(),
+        hasNether,
+        hasEnd
+      });
+    }
+  }
+
+  // If active world folder doesn't exist yet (fresh server), list it as ready to generate
+  if (!seenNames.has(activeWorld)) {
+    foundWorlds.unshift({
+      name: activeWorld,
+      isActive: true,
+      sizeBytes: 0,
+      lastModified: Date.now(),
+      hasNether: false,
+      hasEnd: false
+    });
+  }
+
+  return {
+    activeWorld,
+    worlds: foundWorlds.sort((a, b) => (b.isActive ? 1 : 0) - (a.isActive ? 1 : 0))
+  };
+}
+
+function getBackupsInServer(serverPath: string): WorldBackup[] {
+  const backupsDir = path.join(serverPath, 'backups');
+  if (!fs.existsSync(backupsDir)) {
+    return [];
+  }
+
+  const entries = fs.readdirSync(backupsDir, { withFileTypes: true });
+  const backups: WorldBackup[] = [];
+
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith('.zip')) continue;
+    const fullPath = path.join(backupsDir, entry.name);
+    try {
+      const stat = fs.statSync(fullPath);
+      const match = entry.name.match(/^([^_]+(?:_[^_]+)*?)_backup_/);
+      const worldName = match ? match[1] : 'world';
+
+      backups.push({
+        id: entry.name,
+        fileName: entry.name,
+        filePath: fullPath,
+        worldName,
+        sizeBytes: stat.size,
+        createdAt: stat.mtimeMs
+      });
+    } catch {}
+  }
+
+  return backups.sort((a, b) => b.createdAt - a.createdAt);
+}
+
+ipcMain.handle('worlds:list', async (_, serverPath: string) => {
+  return listWorldsInServer(serverPath);
+});
+
+ipcMain.handle('worlds:setActive', async (_, { serverPath, worldName }: { serverPath: string; worldName: string }) => {
+  const propsPath = path.join(serverPath, 'server.properties');
+  if (fs.existsSync(propsPath)) {
+    let content = fs.readFileSync(propsPath, 'utf-8');
+    if (content.match(/^level-name\s*=/m)) {
+      content = content.replace(/^level-name\s*=.*$/m, `level-name=${worldName}`);
+    } else {
+      content += `\nlevel-name=${worldName}\n`;
+    }
+    fs.writeFileSync(propsPath, content, 'utf-8');
+    return true;
+  }
+  return false;
+});
+
+ipcMain.handle('worlds:create', async (_, { serverPath, options }: { serverPath: string; options: CreateWorldOptions }) => {
+  try {
+    const cleanName = options.name.trim().replace(/[^a-zA-Z0-9_\-]/g, '_');
+    if (!cleanName) return { success: false, error: 'Invalid world name' };
+
+    const worldDir = path.join(serverPath, cleanName);
+    if (!fs.existsSync(worldDir)) {
+      fs.mkdirSync(worldDir, { recursive: true });
+    }
+
+    if (options.switchActive) {
+      const propsPath = path.join(serverPath, 'server.properties');
+      if (fs.existsSync(propsPath)) {
+        let content = fs.readFileSync(propsPath, 'utf-8');
+        const updateLine = (key: string, val: string) => {
+          const regex = new RegExp(`^${key}\\s*=.*$`, 'm');
+          if (content.match(regex)) {
+            content = content.replace(regex, `${key}=${val}`);
+          } else {
+            content += `\n${key}=${val}\n`;
+          }
+        };
+
+        updateLine('level-name', cleanName);
+        if (options.seed !== undefined) updateLine('level-seed', options.seed);
+        if (options.generatorType) updateLine('level-type', options.generatorType);
+        if (options.difficulty) updateLine('difficulty', options.difficulty);
+        if (options.hardcore !== undefined) updateLine('hardcore', options.hardcore ? 'true' : 'false');
+
+        fs.writeFileSync(propsPath, content, 'utf-8');
+      }
+    }
+
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('worlds:duplicate', async (_, { serverPath, sourceWorldName, targetWorldName }: { serverPath: string; sourceWorldName: string; targetWorldName: string }) => {
+  try {
+    const cleanTarget = targetWorldName.trim().replace(/[^a-zA-Z0-9_\-]/g, '_');
+    if (!cleanTarget) return { success: false, error: 'Invalid destination world name' };
+
+    const srcDir = path.join(serverPath, sourceWorldName);
+    const dstDir = path.join(serverPath, cleanTarget);
+    if (!fs.existsSync(srcDir)) return { success: false, error: 'Source world directory does not exist' };
+    if (fs.existsSync(dstDir)) return { success: false, error: 'A world with that name already exists' };
+
+    copyDirectorySync(srcDir, dstDir);
+
+    const srcNether = path.join(serverPath, `${sourceWorldName}_nether`);
+    if (fs.existsSync(srcNether)) {
+      copyDirectorySync(srcNether, path.join(serverPath, `${cleanTarget}_nether`));
+    }
+    const srcEnd = path.join(serverPath, `${sourceWorldName}_the_end`);
+    if (fs.existsSync(srcEnd)) {
+      copyDirectorySync(srcEnd, path.join(serverPath, `${cleanTarget}_the_end`));
+    }
+
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('worlds:delete', async (_, { serverPath, worldName }: { serverPath: string; worldName: string }) => {
+  try {
+    const active = getActiveWorldName(serverPath);
+    if (worldName === active) {
+      return { success: false, error: 'Cannot delete the currently active world! Switch to another world first.' };
+    }
+
+    const worldDir = path.join(serverPath, worldName);
+    if (fs.existsSync(worldDir)) {
+      fs.rmSync(worldDir, { recursive: true, force: true });
+    }
+    const netherDir = path.join(serverPath, `${worldName}_nether`);
+    if (fs.existsSync(netherDir)) {
+      fs.rmSync(netherDir, { recursive: true, force: true });
+    }
+    const endDir = path.join(serverPath, `${worldName}_the_end`);
+    if (fs.existsSync(endDir)) {
+      fs.rmSync(endDir, { recursive: true, force: true });
+    }
+
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('worlds:regenerate', async (_, { serverPath, worldName, options }: { serverPath: string; worldName: string; options: RegenerateWorldOptions }) => {
+  try {
+    const servers = loadServers();
+    const serverInstance = servers.find((s) => s.path === serverPath);
+    if (serverInstance && runningProcesses.has(serverInstance.id)) {
+      return { success: false, error: 'Server is currently running! Please stop the server before regenerating the world.' };
+    }
+
+    // 1. Safety backup if requested
+    if (options.createBackupFirst) {
+      const backupsDir = path.join(serverPath, 'backups');
+      if (!fs.existsSync(backupsDir)) {
+        fs.mkdirSync(backupsDir, { recursive: true });
+      }
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const fileName = `${worldName}_pre-regen_${timestamp}.zip`;
+      const targetZipPath = path.join(backupsDir, fileName);
+
+      const zip = new AdmZip();
+      const worldDir = path.join(serverPath, worldName);
+      if (fs.existsSync(worldDir)) {
+        zip.addLocalFolder(worldDir, worldName);
+      }
+      const netherDir = path.join(serverPath, `${worldName}_nether`);
+      if (fs.existsSync(netherDir)) {
+        zip.addLocalFolder(netherDir, `${worldName}_nether`);
+      }
+      const endDir = path.join(serverPath, `${worldName}_the_end`);
+      if (fs.existsSync(endDir)) {
+        zip.addLocalFolder(endDir, `${worldName}_the_end`);
+      }
+      zip.addFile(
+        'backup-metadata.json',
+        Buffer.from(JSON.stringify({ reason: 'Auto-backup before world regeneration', worldName, createdAt: new Date().toISOString() }), 'utf-8')
+      );
+      await zip.writeZipPromise(targetZipPath);
+    }
+
+    // 2. Wipe existing world data
+    const worldDir = path.join(serverPath, worldName);
+    if (fs.existsSync(worldDir)) {
+      fs.rmSync(worldDir, { recursive: true, force: true });
+    }
+    const netherDir = path.join(serverPath, `${worldName}_nether`);
+    if (fs.existsSync(netherDir)) {
+      fs.rmSync(netherDir, { recursive: true, force: true });
+    }
+    const endDir = path.join(serverPath, `${worldName}_the_end`);
+    if (fs.existsSync(endDir)) {
+      fs.rmSync(endDir, { recursive: true, force: true });
+    }
+
+    // 3. Update level-seed in server.properties if specified
+    if (options.newSeed !== undefined) {
+      const propsPath = path.join(serverPath, 'server.properties');
+      if (fs.existsSync(propsPath)) {
+        let content = fs.readFileSync(propsPath, 'utf-8');
+        if (content.match(/^level-seed\s*=/m)) {
+          content = content.replace(/^level-seed\s*=.*$/m, `level-seed=${options.newSeed}`);
+        } else {
+          content += `\nlevel-seed=${options.newSeed}\n`;
+        }
+        fs.writeFileSync(propsPath, content, 'utf-8');
+      }
+    }
+
+    return { success: true };
+  } catch (err: any) {
+    console.error('Failed to regenerate world:', err);
+    return { success: false, error: err.message || 'Failed to regenerate world' };
+  }
+});
+
+ipcMain.handle('worlds:getBackups', async (_, serverPath: string) => {
+  return getBackupsInServer(serverPath);
+});
+
+ipcMain.handle('worlds:createBackup', async (_, { serverPath, worldName, note }: { serverPath: string; worldName: string; note?: string }) => {
+  try {
+    const backupsDir = path.join(serverPath, 'backups');
+    if (!fs.existsSync(backupsDir)) {
+      fs.mkdirSync(backupsDir, { recursive: true });
+    }
+
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const fileName = `${worldName}_backup_${timestamp}.zip`;
+    const targetZipPath = path.join(backupsDir, fileName);
+
+    const zip = new AdmZip();
+    const worldDir = path.join(serverPath, worldName);
+    if (fs.existsSync(worldDir)) {
+      zip.addLocalFolder(worldDir, worldName);
+    }
+
+    const netherDir = path.join(serverPath, `${worldName}_nether`);
+    if (fs.existsSync(netherDir)) {
+      zip.addLocalFolder(netherDir, `${worldName}_nether`);
+    }
+
+    const endDir = path.join(serverPath, `${worldName}_the_end`);
+    if (fs.existsSync(endDir)) {
+      zip.addLocalFolder(endDir, `${worldName}_the_end`);
+    }
+
+    const meta = {
+      worldName,
+      createdAt: new Date().toISOString(),
+      note: note || ''
+    };
+    zip.addFile('backup-metadata.json', Buffer.from(JSON.stringify(meta, null, 2), 'utf-8'));
+
+    await zip.writeZipPromise(targetZipPath);
+
+    const stat = fs.statSync(targetZipPath);
+    const backup: WorldBackup = {
+      id: fileName,
+      fileName,
+      filePath: targetZipPath,
+      worldName,
+      sizeBytes: stat.size,
+      createdAt: stat.mtimeMs,
+      note
+    };
+
+    return { success: true, backup };
+  } catch (err: any) {
+    console.error('Failed to create world backup:', err);
+    return { success: false, error: err.message || 'Failed to create backup' };
+  }
+});
+
+ipcMain.handle('worlds:restoreBackup', async (_, { serverPath, backupFileName, targetWorldName }: { serverPath: string; backupFileName: string; targetWorldName?: string }) => {
+  try {
+    const servers = loadServers();
+    const serverInstance = servers.find((s) => s.path === serverPath);
+    if (serverInstance && runningProcesses.has(serverInstance.id)) {
+      return { success: false, error: 'Server is currently running! Please stop the server before restoring a backup to prevent world corruption.' };
+    }
+
+    const zipPath = path.join(serverPath, 'backups', backupFileName);
+    if (!fs.existsSync(zipPath)) {
+      return { success: false, error: 'Backup archive not found.' };
+    }
+
+    const zip = new AdmZip(zipPath);
+    zip.extractAllTo(serverPath, true);
+
+    if (targetWorldName) {
+      const propsPath = path.join(serverPath, 'server.properties');
+      if (fs.existsSync(propsPath)) {
+        let content = fs.readFileSync(propsPath, 'utf-8');
+        if (content.match(/^level-name\s*=/m)) {
+          content = content.replace(/^level-name\s*=.*$/m, `level-name=${targetWorldName}`);
+        } else {
+          content += `\nlevel-name=${targetWorldName}\n`;
+        }
+        fs.writeFileSync(propsPath, content, 'utf-8');
+      }
+    }
+
+    return { success: true };
+  } catch (err: any) {
+    console.error('Failed to restore backup:', err);
+    return { success: false, error: err.message || 'Failed to restore backup' };
+  }
+});
+
+ipcMain.handle('worlds:deleteBackup', async (_, { serverPath, backupFileName }: { serverPath: string; backupFileName: string }) => {
+  const target = path.join(serverPath, 'backups', backupFileName);
+  if (fs.existsSync(target)) {
+    try {
+      fs.unlinkSync(target);
+      return true;
+    } catch {}
+  }
+  return false;
+});
+
 

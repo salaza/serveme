@@ -118,3 +118,37 @@ export interface PortCheckResult {
   publicIp?: string;
   message?: string;
 }
+
+export interface WorldInfo {
+  name: string;
+  isActive: boolean;
+  sizeBytes: number;
+  lastModified: number;
+  hasNether: boolean;
+  hasEnd: boolean;
+}
+
+export interface WorldBackup {
+  id: string;
+  fileName: string;
+  filePath: string;
+  worldName: string;
+  sizeBytes: number;
+  createdAt: number;
+  note?: string;
+}
+
+export interface CreateWorldOptions {
+  name: string;
+  seed?: string;
+  generatorType?: string;
+  difficulty?: string;
+  hardcore?: boolean;
+  switchActive?: boolean;
+}
+
+export interface RegenerateWorldOptions {
+  createBackupFirst: boolean;
+  newSeed?: string;
+}
+

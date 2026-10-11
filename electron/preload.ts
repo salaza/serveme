@@ -1,5 +1,16 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import { ServerInstance, ModlistFile, AppSettings, PortCheckResult, JavaVersionInfo, JavaValidationResult } from '../src/types';
+import {
+  ServerInstance,
+  ModlistFile,
+  AppSettings,
+  PortCheckResult,
+  JavaVersionInfo,
+  JavaValidationResult,
+  WorldInfo,
+  WorldBackup,
+  CreateWorldOptions,
+  RegenerateWorldOptions
+} from '../src/types';
 
 export const electronAPI = {
   // Server management
@@ -89,7 +100,30 @@ export const electronAPI = {
   checkPort: (port: number, serverId?: string): Promise<PortCheckResult> =>
     ipcRenderer.invoke('network:checkPort', { port, serverId }),
   openRouterSettings: (gatewayIp: string): Promise<void> =>
-    ipcRenderer.invoke('network:openRouter', gatewayIp)
+    ipcRenderer.invoke('network:openRouter', gatewayIp),
+
+  // Worlds & Backups
+  getWorlds: (serverPath: string): Promise<{ activeWorld: string; worlds: WorldInfo[] }> =>
+    ipcRenderer.invoke('worlds:list', serverPath),
+  setActiveWorld: (serverPath: string, worldName: string): Promise<boolean> =>
+    ipcRenderer.invoke('worlds:setActive', { serverPath, worldName }),
+  createWorld: (serverPath: string, options: CreateWorldOptions): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('worlds:create', { serverPath, options }),
+  duplicateWorld: (serverPath: string, sourceWorldName: string, targetWorldName: string): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('worlds:duplicate', { serverPath, sourceWorldName, targetWorldName }),
+  deleteWorld: (serverPath: string, worldName: string): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('worlds:delete', { serverPath, worldName }),
+  regenerateWorld: (serverPath: string, worldName: string, options: RegenerateWorldOptions): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('worlds:regenerate', { serverPath, worldName, options }),
+
+  getWorldBackups: (serverPath: string): Promise<WorldBackup[]> =>
+    ipcRenderer.invoke('worlds:getBackups', serverPath),
+  createWorldBackup: (serverPath: string, worldName: string, note?: string): Promise<{ success: boolean; backup?: WorldBackup; error?: string }> =>
+    ipcRenderer.invoke('worlds:createBackup', { serverPath, worldName, note }),
+  restoreWorldBackup: (serverPath: string, backupFileName: string, targetWorldName?: string): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('worlds:restoreBackup', { serverPath, backupFileName, targetWorldName }),
+  deleteWorldBackup: (serverPath: string, backupFileName: string): Promise<boolean> =>
+    ipcRenderer.invoke('worlds:deleteBackup', { serverPath, backupFileName })
 };
 
 contextBridge.exposeInMainWorld('electronAPI', electronAPI);

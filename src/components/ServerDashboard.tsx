@@ -3,6 +3,7 @@ import { ServerInstance, AppSettings } from '../types';
 import { ConsoleTab } from './ConsoleTab';
 import { ModsTab } from './ModsTab';
 import { ConfigTab } from './ConfigTab';
+import { WorldsTab } from './WorldsTab';
 import {
   Terminal,
   Package,
@@ -35,7 +36,7 @@ export const ServerDashboard: React.FC<ServerDashboardProps> = ({
   onServerUpdated,
   onServerDeleted
 }) => {
-  const [activeTab, setActiveTab] = useState<'console' | 'mods' | 'config'>('console');
+  const [activeTab, setActiveTab] = useState<'console' | 'mods' | 'worlds' | 'config'>('console');
   const [isStarting, setIsStarting] = useState(false);
   const [isStopping, setIsStopping] = useState(false);
   const [isCheckingPort, setIsCheckingPort] = useState(false);
@@ -288,6 +289,18 @@ export const ServerDashboard: React.FC<ServerDashboardProps> = ({
         </button>
 
         <button
+          onClick={() => setActiveTab('worlds')}
+          className={`py-3 text-xs font-semibold border-b-2 flex items-center gap-2 transition ${
+            activeTab === 'worlds'
+              ? 'border-emerald-500 text-emerald-400'
+              : 'border-transparent text-slate-400 hover:text-slate-200'
+          }`}
+        >
+          <Globe className="w-4 h-4" />
+          <span>Worlds & Backups</span>
+        </button>
+
+        <button
           onClick={() => setActiveTab('config')}
           className={`py-3 text-xs font-semibold border-b-2 flex items-center gap-2 transition ${
             activeTab === 'config'
@@ -315,6 +328,13 @@ export const ServerDashboard: React.FC<ServerDashboardProps> = ({
           <ModsTab
             server={server}
             settings={settings}
+          />
+        )}
+        {activeTab === 'worlds' && (
+          <WorldsTab
+            server={server}
+            onServerUpdated={onServerUpdated}
+            isServerRunning={isRunning}
           />
         )}
         {activeTab === 'config' && (
