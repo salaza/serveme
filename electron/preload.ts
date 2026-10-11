@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import { ServerInstance, ModlistFile, AppSettings, PortCheckResult } from '../src/types';
+import { ServerInstance, ModlistFile, AppSettings, PortCheckResult, JavaVersionInfo, JavaValidationResult } from '../src/types';
 
 export const electronAPI = {
   // Server management
@@ -78,8 +78,12 @@ export const electronAPI = {
   // Settings & System
   getSettings: (): Promise<AppSettings> => ipcRenderer.invoke('settings:get'),
   saveSettings: (settings: AppSettings): Promise<void> => ipcRenderer.invoke('settings:save', settings),
-  detectJava: (): Promise<Array<{ path: string; version: string; isDefault: boolean }>> =>
+  detectJava: (): Promise<JavaVersionInfo[]> =>
     ipcRenderer.invoke('system:detectJava'),
+  validateServerJava: (payload: { mcVersion: string; javaPath: string }): Promise<JavaValidationResult> =>
+    ipcRenderer.invoke('system:validateJava', payload),
+  openExternalUrl: (url: string): Promise<void> =>
+    ipcRenderer.invoke('shell:openExternal', url),
 
   // Network & Router Gateway
   checkPort: (port: number): Promise<PortCheckResult> =>

@@ -5,7 +5,7 @@ import { spawn, execSync, ChildProcess } from 'child_process';
 import http from 'http';
 import https from 'https';
 import net from 'net';
-import { ServerInstance, AppSettings, ModlistFile, PortCheckResult } from '../src/types';
+import { ServerInstance, AppSettings, ModlistFile, PortCheckResult, JavaVersionInfo, JavaValidationResult } from '../src/types';
 
 let mainWindow: BrowserWindow | null = null;
 const runningProcesses = new Map<string, ChildProcess>();
@@ -581,25 +581,60 @@ ipcMain.handle('settings:save', async (_, settings: AppSettings) => {
   saveSettingsToDisk(settings);
 });
 
-ipcMain.handle('system:detectJava', async () => {
-  const javaList: Array<{ path: string; version: string; isDefault: boolean }> = [];
+// Java Version Discovery & Validation
+function parseJavaMajor(raw: string): number {
+  const m = raw.match(/version\s*["']?(\d+)(?:\.(\d+))?/i) || raw.match(/(\d+)(?:\.(\d+))?/);
+  if (!m) return 0;
+  const first = parseInt(m[1], 10);
+  if (first === 1 && m[2]) {
+    return parseInt(m[2], 10); // 1.8 -> 8
+  }
+  return first;
+}
 
-  // Check PATH default java
+function detectAllJavas(): JavaVersionInfo[] {
+  const javaList: JavaVersionInfo[] = [];
+  const seenPaths = new Set<string>();
+
+  // 1. Check PATH default java
   try {
     const output = execSync('java -version 2>&1', { encoding: 'utf-8' });
-    const versionMatch = output.match(/version "(.*?)"/) || output.match(/openjdk (.*?)\s/);
+    const major = parseJavaMajor(output);
     javaList.push({
       path: 'java',
-      version: versionMatch ? versionMatch[1] : 'Detected in PATH',
+      version: `Java ${major || 21} (PATH Default)`,
+      major: major || 21,
       isDefault: true
     });
+    seenPaths.add('java');
   } catch {}
 
-  // Check known Windows JDK installations
+  // 2. Check JAVA_HOME if set
+  if (process.env.JAVA_HOME) {
+    const javaHomeExe = path.join(process.env.JAVA_HOME, 'bin', 'java.exe');
+    if (fs.existsSync(javaHomeExe) && !seenPaths.has(javaHomeExe.toLowerCase())) {
+      try {
+        const output = execSync(`"${javaHomeExe}" -version 2>&1`, { encoding: 'utf-8' });
+        const major = parseJavaMajor(output);
+        javaList.push({
+          path: javaHomeExe,
+          version: `Java ${major} (JAVA_HOME)`,
+          major,
+          isDefault: false
+        });
+        seenPaths.add(javaHomeExe.toLowerCase());
+      } catch {}
+    }
+  }
+
+  // 3. Check known directories
   const searchDirs = [
     'C:\\Program Files\\Java',
     'C:\\Program Files\\Microsoft',
-    'C:\\Program Files\\Eclipse Adoptium'
+    'C:\\Program Files\\Eclipse Adoptium',
+    'C:\\Program Files\\BellSoft',
+    'C:\\Program Files\\Amazon Corretto',
+    'C:\\Program Files (x86)\\Java'
   ];
 
   for (const dir of searchDirs) {
@@ -608,15 +643,17 @@ ipcMain.handle('system:detectJava', async () => {
         const subdirs = fs.readdirSync(dir);
         for (const sub of subdirs) {
           const javaExe = path.join(dir, sub, 'bin', 'java.exe');
-          if (fs.existsSync(javaExe)) {
+          if (fs.existsSync(javaExe) && !seenPaths.has(javaExe.toLowerCase())) {
             try {
               const output = execSync(`"${javaExe}" -version 2>&1`, { encoding: 'utf-8' });
-              const match = output.match(/version "(.*?)"/) || output.match(/openjdk (.*?)\s/);
+              const major = parseJavaMajor(output);
               javaList.push({
                 path: javaExe,
-                version: match ? match[1] : sub,
+                version: `Java ${major} (${sub})`,
+                major,
                 isDefault: false
               });
+              seenPaths.add(javaExe.toLowerCase());
             } catch {}
           }
         }
@@ -624,7 +661,112 @@ ipcMain.handle('system:detectJava', async () => {
     }
   }
 
-  return javaList;
+  // Sort descending by major version (25, 21, 17, 8)
+  return javaList.sort((a, b) => b.major - a.major);
+}
+
+function getRequiredJavaVersionNumber(mcVersion: string): { major: number; reason: string; downloadUrl: string } {
+  const clean = (mcVersion || '').trim().toLowerCase();
+  if (clean.startsWith('26') || clean.startsWith('25') || clean.startsWith('1.25')) {
+    return {
+      major: 25,
+      reason: 'Minecraft 26+ snapshots require Java 25 (class file version 69.0)',
+      downloadUrl: 'https://learn.microsoft.com/en-us/java/openjdk/download'
+    };
+  }
+
+  const parts = clean.split('.').map(p => parseInt(p, 10));
+  if (parts.length >= 2 && parts[0] === 1) {
+    const minor = parts[1];
+    const patch = parts[2] || 0;
+    if (minor > 20 || (minor === 20 && patch >= 5)) {
+      return {
+        major: 21,
+        reason: 'Minecraft 1.20.5+ requires Java 21 (class file version 65.0)',
+        downloadUrl: 'https://adoptium.net/temurin/releases/?version=21'
+      };
+    }
+    if (minor >= 18) {
+      return {
+        major: 17,
+        reason: 'Minecraft 1.18 – 1.20.4 requires Java 17 (class file version 61.0)',
+        downloadUrl: 'https://adoptium.net/temurin/releases/?version=17'
+      };
+    }
+    if (minor === 17) {
+      return {
+        major: 16,
+        reason: 'Minecraft 1.17 requires Java 16+ (class file version 60.0)',
+        downloadUrl: 'https://adoptium.net/temurin/releases/?version=17'
+      };
+    }
+    return {
+      major: 8,
+      reason: 'Minecraft 1.16.5 and older requires Java 8 (class file version 52.0)',
+      downloadUrl: 'https://adoptium.net/temurin/releases/?version=8'
+    };
+  }
+
+  return {
+    major: 21,
+    reason: 'Standard modern Minecraft runtime',
+    downloadUrl: 'https://adoptium.net/temurin/releases/?version=21'
+  };
+}
+
+ipcMain.handle('system:detectJava', async (): Promise<JavaVersionInfo[]> => {
+  return detectAllJavas();
+});
+
+ipcMain.handle('system:validateJava', async (_, { mcVersion, javaPath }: { mcVersion: string; javaPath: string }): Promise<JavaValidationResult> => {
+  const allDetectedJavas = detectAllJavas();
+  const req = getRequiredJavaVersionNumber(mcVersion);
+
+  let currentMajor = 0;
+  try {
+    const javaBin = javaPath || 'java';
+    const output = execSync(`"${javaBin}" -version 2>&1`, { encoding: 'utf-8' });
+    currentMajor = parseJavaMajor(output);
+  } catch (err) {
+    console.warn(`Failed to inspect current javaPath "${javaPath}":`, err);
+  }
+
+  const isCompatible = req.major === 8
+    ? currentMajor === 8 || currentMajor === 11
+    : currentMajor >= req.major;
+
+  if (isCompatible && currentMajor > 0) {
+    return {
+      valid: true,
+      currentMajor,
+      requiredMajor: req.major,
+      currentJavaPath: javaPath,
+      allDetectedJavas,
+      reason: `Installed Java ${currentMajor} meets requirement of Java ${req.major}`
+    };
+  }
+
+  // Incompatible! Find a compatible one among allDetectedJavas
+  const candidate = allDetectedJavas.find(j => {
+    if (req.major === 8) return j.major === 8;
+    return j.major >= req.major;
+  });
+
+  return {
+    valid: false,
+    currentMajor,
+    requiredMajor: req.major,
+    currentJavaPath: javaPath,
+    compatibleJavaPath: candidate ? candidate.path : undefined,
+    compatibleVersionName: candidate ? candidate.version : undefined,
+    allDetectedJavas,
+    downloadUrl: req.downloadUrl,
+    reason: req.reason
+  };
+});
+
+ipcMain.handle('shell:openExternal', async (_, url: string) => {
+  await shell.openExternal(url);
 });
 
 // Network & Router Gateway Detection

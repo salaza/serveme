@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { ServerInstance, PortCheckResult } from '../types';
-import { Sliders, Save, FileCode, CheckCircle2, HardDrive, Cpu, Shield, Globe, Network, Loader2 } from 'lucide-react';
+import { ServerInstance, PortCheckResult, JavaVersionInfo } from '../types';
+import { Sliders, Save, FileCode, CheckCircle2, HardDrive, Cpu, Shield, Globe, Network, Loader2, Coffee, ExternalLink } from 'lucide-react';
 import { PortWarningModal } from './PortWarningModal';
+import { getRequiredJavaVersion } from '../services/minecraft-meta';
 
 interface ConfigTabProps {
   server: ServerInstance;
@@ -16,6 +17,7 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({ server, onServerUpdated })
   const [ramMax, setRamMax] = useState(server.ramMax || 4);
   const [jvmArgs, setJvmArgs] = useState(server.jvmArgs || '');
   const [javaPath, setJavaPath] = useState(server.javaPath || 'java');
+  const [detectedJavas, setDetectedJavas] = useState<JavaVersionInfo[]>([]);
   const [savedSuccess, setSavedSuccess] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isTestingPort, setIsTestingPort] = useState(false);
@@ -25,6 +27,9 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({ server, onServerUpdated })
 
   useEffect(() => {
     loadProperties();
+    window.electronAPI.detectJava().then((list) => {
+      setDetectedJavas(list);
+    });
   }, [server.id, server.path]);
 
   const loadProperties = async () => {
@@ -400,16 +405,73 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({ server, onServerUpdated })
             </div>
 
             {/* Java Executable Path */}
-            <div className="space-y-1.5">
-              <label className="text-xs font-semibold text-slate-300">Java Executable Path</label>
-              <input
-                type="text"
-                value={javaPath}
-                onChange={(e) => setJavaPath(e.target.value)}
-                placeholder="java or C:\Program Files\Java\jdk-21\bin\java.exe"
-                className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-white font-mono focus:outline-none focus:border-emerald-500"
-              />
-            </div>
+            {(() => {
+              const req = getRequiredJavaVersion(server.version);
+              const currentSelected = detectedJavas.find(j => j.path === javaPath);
+              const isMatch = currentSelected
+                ? (req.major === 8 ? currentSelected.major === 8 : currentSelected.major >= req.major)
+                : true;
+
+              return (
+                <div className="space-y-2 pt-2 border-t border-slate-800/80">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                      <Coffee className="w-4 h-4 text-emerald-400" />
+                      <span>Java Executable Path</span>
+                    </label>
+                    <span className={`text-[10px] px-2 py-0.5 rounded font-medium ${
+                      isMatch
+                        ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-800/60'
+                        : 'bg-rose-950/80 text-rose-400 border border-rose-800/60'
+                    }`}>
+                      {req.name} Required for MC {server.version}
+                    </span>
+                  </div>
+
+                  {detectedJavas.length > 0 && (
+                    <div className="space-y-1">
+                      <span className="text-[11px] text-slate-400">Quick Select Detected Runtimes:</span>
+                      <select
+                        value={javaPath}
+                        onChange={(e) => setJavaPath(e.target.value)}
+                        className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white font-mono focus:outline-none focus:border-emerald-500"
+                      >
+                        {detectedJavas.map((j) => (
+                          <option key={j.path} value={j.path}>
+                            {j.version} ({j.path})
+                          </option>
+                        ))}
+                        {!detectedJavas.some(j => j.path === javaPath) && javaPath && (
+                          <option value={javaPath}>Custom: {javaPath}</option>
+                        )}
+                      </select>
+                    </div>
+                  )}
+
+                  <input
+                    type="text"
+                    value={javaPath}
+                    onChange={(e) => setJavaPath(e.target.value)}
+                    placeholder="java or C:\Program Files\Microsoft\jdk-25.0.1.8-hotspot\bin\java.exe"
+                    className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-white font-mono focus:outline-none focus:border-emerald-500"
+                  />
+
+                  {!isMatch && (
+                    <div className="flex items-center justify-between p-2.5 bg-rose-950/40 border border-rose-800/40 rounded-xl text-xs text-rose-300">
+                      <span>{req.reason}</span>
+                      <button
+                        type="button"
+                        onClick={() => window.electronAPI.openExternalUrl(req.downloadUrl)}
+                        className="px-2.5 py-1 bg-rose-600/80 hover:bg-rose-500 text-white rounded-lg text-[11px] font-medium flex items-center gap-1 transition"
+                      >
+                        <span>Download {req.name}</span>
+                        <ExternalLink className="w-3 h-3" />
+                      </button>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
           </div>
         )}
 

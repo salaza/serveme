@@ -84,8 +84,27 @@ export interface AppSettings {
   preferredModProvider: ModProvider;
 }
 
+export interface JavaVersionInfo {
+  path: string;
+  version: string;
+  major: number;
+  isDefault: boolean;
+}
+
+export interface JavaValidationResult {
+  valid: boolean;
+  currentMajor: number;
+  requiredMajor: number;
+  currentJavaPath: string;
+  compatibleJavaPath?: string;
+  compatibleVersionName?: string;
+  allDetectedJavas: JavaVersionInfo[];
+  downloadUrl?: string;
+  reason: string;
+}
+
 export interface SystemInfo {
-  javaVersions: Array<{ path: string; version: string; isDefault: boolean }>;
+  javaVersions: JavaVersionInfo[];
   totalMemoryGb: number;
   freeMemoryGb: number;
 }

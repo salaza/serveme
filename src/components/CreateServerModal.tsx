@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { ServerInstance, MinecraftLoader, AppSettings } from '../types';
+import { ServerInstance, MinecraftLoader, AppSettings, JavaVersionInfo } from '../types';
 import {
   fetchMinecraftVersions,
   fetchFabricLoaders,
@@ -8,9 +8,10 @@ import {
   getPaperServerDownloadUrl,
   getPurpurServerDownloadUrl,
   getVanillaServerDownloadUrl,
+  getRequiredJavaVersion,
   MinecraftVersionItem
 } from '../services/minecraft-meta';
-import { X, Folder, Server, Check, Loader2, Sparkles, AlertCircle, Cpu, HardDrive } from 'lucide-react';
+import { X, Folder, Server, Check, Loader2, Sparkles, AlertCircle, Cpu, HardDrive, Coffee, ExternalLink } from 'lucide-react';
 
 interface CreateServerModalProps {
   isOpen: boolean;
@@ -34,6 +35,8 @@ export const CreateServerModal: React.FC<CreateServerModalProps> = ({
   const [ramMin, setRamMin] = useState(2);
   const [ramMax, setRamMax] = useState(4);
   const [acceptEula, setAcceptEula] = useState(true);
+  const [detectedJavas, setDetectedJavas] = useState<JavaVersionInfo[]>([]);
+  const [selectedJavaPath, setSelectedJavaPath] = useState('');
 
   // Data fetching state
   const [mcVersions, setMcVersions] = useState<MinecraftVersionItem[]>([]);
@@ -66,6 +69,31 @@ export const CreateServerModal: React.FC<CreateServerModalProps> = ({
         .finally(() => setLoadingVersions(false));
     }
   }, [isOpen]);
+
+  // Fetch detected Java versions on mount
+  useEffect(() => {
+    if (isOpen) {
+      window.electronAPI.detectJava().then((list) => {
+        setDetectedJavas(list);
+      });
+    }
+  }, [isOpen]);
+
+  // Auto-select best matching Java whenever mcVersion or detectedJavas change
+  useEffect(() => {
+    if (detectedJavas.length > 0 && mcVersion) {
+      const req = getRequiredJavaVersion(mcVersion);
+      const match = detectedJavas.find(j => {
+        if (req.major === 8) return j.major === 8;
+        return j.major >= req.major;
+      });
+      if (match) {
+        setSelectedJavaPath(match.path);
+      } else if (!selectedJavaPath) {
+        setSelectedJavaPath(settings.defaultJavaPath || 'java');
+      }
+    }
+  }, [mcVersion, detectedJavas]);
 
   // Fetch loader versions when mcVersion or loader changes
   useEffect(() => {
@@ -141,7 +169,7 @@ export const CreateServerModal: React.FC<CreateServerModalProps> = ({
         port,
         ramMin,
         ramMax,
-        javaPath: settings.defaultJavaPath || 'java',
+        javaPath: selectedJavaPath || settings.defaultJavaPath || 'java',
         status: 'stopped',
         createdAt: Date.now()
       };
@@ -343,6 +371,66 @@ export const CreateServerModal: React.FC<CreateServerModalProps> = ({
               </div>
             )}
           </div>
+
+          {/* Java Runtime & Compatibility */}
+          {(() => {
+            const req = getRequiredJavaVersion(mcVersion);
+            const currentSelected = detectedJavas.find(j => j.path === selectedJavaPath);
+            const isMatch = currentSelected
+              ? (req.major === 8 ? currentSelected.major === 8 : currentSelected.major >= req.major)
+              : true;
+
+            return (
+              <div className="p-4 bg-slate-950/70 border border-slate-800/80 rounded-xl space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                    <Coffee className="w-4 h-4 text-emerald-400" />
+                    Java Runtime Selection
+                  </span>
+                  <span className={`text-[10px] px-2 py-0.5 rounded font-medium ${
+                    isMatch
+                      ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-800/60'
+                      : 'bg-amber-950/80 text-amber-400 border border-amber-800/60'
+                  }`}>
+                    {req.name} Required
+                  </span>
+                </div>
+
+                <div className="flex gap-2">
+                  <select
+                    value={selectedJavaPath}
+                    onChange={(e) => setSelectedJavaPath(e.target.value)}
+                    disabled={isInstalling}
+                    className="flex-1 bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-emerald-500 font-mono transition"
+                  >
+                    {detectedJavas.map((j) => (
+                      <option key={j.path} value={j.path}>
+                        {j.version} ({j.path})
+                      </option>
+                    ))}
+                    {!detectedJavas.some(j => j.path === selectedJavaPath) && selectedJavaPath && (
+                      <option value={selectedJavaPath}>{selectedJavaPath}</option>
+                    )}
+                  </select>
+
+                  {!isMatch && (
+                    <button
+                      type="button"
+                      onClick={() => window.electronAPI.openExternalUrl(req.downloadUrl)}
+                      className="px-3 py-1.5 bg-blue-600/90 hover:bg-blue-500 text-white rounded-xl text-xs font-medium flex items-center gap-1 transition shrink-0"
+                    >
+                      <span>Download {req.name}</span>
+                      <ExternalLink className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+
+                <p className="text-[11px] text-slate-400">
+                  {req.reason}
+                </p>
+              </div>
+            );
+          })()}
 
           {/* Memory Allocation */}
           <div className="p-4 bg-slate-950/70 border border-slate-800/80 rounded-xl space-y-3">

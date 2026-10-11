@@ -18,8 +18,9 @@ import {
   AlertCircle
 } from 'lucide-react';
 
-import { PortCheckResult } from '../types';
+import { PortCheckResult, JavaValidationResult } from '../types';
 import { PortWarningModal } from './PortWarningModal';
+import { JavaVersionModal } from './JavaVersionModal';
 
 interface ServerDashboardProps {
   server: ServerInstance;
@@ -40,16 +41,68 @@ export const ServerDashboard: React.FC<ServerDashboardProps> = ({
   const [isCheckingPort, setIsCheckingPort] = useState(false);
   const [portWarningResult, setPortWarningResult] = useState<PortCheckResult | null>(null);
   const [isPortModalOpen, setIsPortModalOpen] = useState(false);
+  const [javaValidation, setJavaValidation] = useState<JavaValidationResult | null>(null);
+  const [isJavaModalOpen, setIsJavaModalOpen] = useState(false);
 
   const isRunning = server.status === 'running';
 
   const initiateStart = async () => {
+    setIsStarting(true);
+    try {
+      // 1. Check Java Version compatibility
+      const javaVal = await window.electronAPI.validateServerJava({
+        mcVersion: server.version,
+        javaPath: server.javaPath || 'java'
+      });
+
+      if (!javaVal.valid) {
+        setJavaValidation(javaVal);
+        setIsJavaModalOpen(true);
+        setIsStarting(false);
+        return;
+      }
+
+      // 2. Check Port forwarding
+      setIsCheckingPort(true);
+      try {
+        const check = await window.electronAPI.checkPort(server.port);
+        if (!check.isOpen) {
+          setPortWarningResult(check);
+          setIsPortModalOpen(true);
+          setIsStarting(false);
+          setIsCheckingPort(false);
+          return;
+        }
+      } catch (err) {
+        console.warn('Port check skipped:', err);
+      } finally {
+        setIsCheckingPort(false);
+      }
+
+      await executeStart();
+    } catch (e: any) {
+      alert(`Error starting server: ${e.message}`);
+      setIsStarting(false);
+    }
+  };
+
+  const handleSwitchJavaAndLaunch = async (newJavaPath: string) => {
+    setIsJavaModalOpen(false);
+    const updatedServer: ServerInstance = {
+      ...server,
+      javaPath: newJavaPath
+    };
+    await window.electronAPI.saveServer(updatedServer);
+    onServerUpdated(updatedServer);
+
+    // Proceed with port check & launch
     setIsCheckingPort(true);
     try {
       const check = await window.electronAPI.checkPort(server.port);
       if (!check.isOpen) {
         setPortWarningResult(check);
         setIsPortModalOpen(true);
+        setIsCheckingPort(false);
         return;
       }
     } catch (err) {
@@ -261,6 +314,16 @@ export const ServerDashboard: React.FC<ServerDashboardProps> = ({
         onLaunchAnyway={executeStart}
         portResult={portWarningResult}
         serverName={server.name}
+      />
+
+      {/* Java Version Warning & Switcher Modal */}
+      <JavaVersionModal
+        isOpen={isJavaModalOpen}
+        onClose={() => setIsJavaModalOpen(false)}
+        validation={javaValidation}
+        onSwitchAndLaunch={handleSwitchJavaAndLaunch}
+        serverName={server.name}
+        mcVersion={server.version}
       />
     </div>
   );

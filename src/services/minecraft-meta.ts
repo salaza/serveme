@@ -105,3 +105,77 @@ export async function getVanillaServerDownloadUrl(gameVersion: string): Promise<
     return null;
   }
 }
+
+export interface RequiredJavaInfo {
+  major: number;
+  name: string;
+  reason: string;
+  downloadUrl: string;
+}
+
+export function getRequiredJavaVersion(mcVersion: string): RequiredJavaInfo {
+  const clean = (mcVersion || '').trim().toLowerCase();
+
+  // 1. Check for 26.x or snapshots for 26w... or 25w... (requires Java 25, class version 69.0)
+  if (clean.startsWith('26') || clean.startsWith('25') || clean.startsWith('1.25')) {
+    return {
+      major: 25,
+      name: 'Java 25 (LTS)',
+      reason: 'Minecraft 26+ snapshots require Java 25 (class file version 69.0)',
+      downloadUrl: 'https://learn.microsoft.com/en-us/java/openjdk/download'
+    };
+  }
+
+  // 2. Parse semver like 1.20.5 or 1.21.x
+  const parts = clean.split('.').map(p => parseInt(p, 10));
+  if (parts.length >= 2 && parts[0] === 1) {
+    const minor = parts[1];
+    const patch = parts[2] || 0;
+
+    // 1.20.5 and 1.21+ require Java 21 (class 65.0)
+    if (minor > 20 || (minor === 20 && patch >= 5)) {
+      return {
+        major: 21,
+        name: 'Java 21 (LTS)',
+        reason: 'Minecraft 1.20.5+ requires Java 21 (class file version 65.0)',
+        downloadUrl: 'https://adoptium.net/temurin/releases/?version=21'
+      };
+    }
+
+    // 1.18 - 1.20.4 require Java 17 (class 61.0)
+    if (minor >= 18) {
+      return {
+        major: 17,
+        name: 'Java 17 (LTS)',
+        reason: 'Minecraft 1.18 – 1.20.4 requires Java 17 (class file version 61.0)',
+        downloadUrl: 'https://adoptium.net/temurin/releases/?version=17'
+      };
+    }
+
+    // 1.17 requires Java 16
+    if (minor === 17) {
+      return {
+        major: 16,
+        name: 'Java 16+',
+        reason: 'Minecraft 1.17 requires Java 16+ (class file version 60.0)',
+        downloadUrl: 'https://adoptium.net/temurin/releases/?version=17'
+      };
+    }
+
+    // <= 1.16.5 requires Java 8 (class 52.0)
+    return {
+      major: 8,
+      name: 'Java 8',
+      reason: 'Minecraft 1.16.5 and older requires Java 8 (class file version 52.0)',
+      downloadUrl: 'https://adoptium.net/temurin/releases/?version=8'
+    };
+  }
+
+  // Fallback to modern standard Java 21
+  return {
+    major: 21,
+    name: 'Java 21 (LTS)',
+    reason: 'Modern Minecraft standard runtime',
+    downloadUrl: 'https://adoptium.net/temurin/releases/?version=21'
+  };
+}
