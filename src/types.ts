@@ -122,6 +122,7 @@ export interface PortCheckResult {
 export interface WorldInfo {
   name: string;
   isActive: boolean;
+  isGenerated: boolean;
   sizeBytes: number;
   lastModified: number;
   hasNether: boolean;

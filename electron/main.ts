@@ -1040,7 +1040,8 @@ function listWorldsInServer(serverPath: string): { activeWorld: string; worlds: 
 
     if (hasLevelDat || hasRegion || isNamedActive) {
       seenNames.add(name);
-      let sizeBytes = getDirectorySize(dirPath);
+      const isGenerated = hasLevelDat || hasRegion;
+      let sizeBytes = isGenerated ? getDirectorySize(dirPath) : 0;
       let mtime = 0;
       try {
         mtime = fs.statSync(dirPath).mtimeMs;
@@ -1048,20 +1049,21 @@ function listWorldsInServer(serverPath: string): { activeWorld: string; worlds: 
 
       // Add nether/end companion sizes if Paper/Spigot style
       const netherPath = path.join(serverPath, `${name}_nether`);
-      const hasNether = fs.existsSync(path.join(dirPath, 'DIM-1')) || fs.existsSync(netherPath);
-      if (fs.existsSync(netherPath)) {
+      const hasNether = isGenerated && (fs.existsSync(path.join(dirPath, 'DIM-1')) || fs.existsSync(netherPath));
+      if (isGenerated && fs.existsSync(netherPath)) {
         sizeBytes += getDirectorySize(netherPath);
       }
 
       const endPath = path.join(serverPath, `${name}_the_end`);
-      const hasEnd = fs.existsSync(path.join(dirPath, 'DIM1')) || fs.existsSync(endPath);
-      if (fs.existsSync(endPath)) {
+      const hasEnd = isGenerated && (fs.existsSync(path.join(dirPath, 'DIM1')) || fs.existsSync(endPath));
+      if (isGenerated && fs.existsSync(endPath)) {
         sizeBytes += getDirectorySize(endPath);
       }
 
       foundWorlds.push({
         name,
         isActive: name === activeWorld,
+        isGenerated,
         sizeBytes,
         lastModified: mtime || Date.now(),
         hasNether,
@@ -1075,8 +1077,9 @@ function listWorldsInServer(serverPath: string): { activeWorld: string; worlds: 
     foundWorlds.unshift({
       name: activeWorld,
       isActive: true,
+      isGenerated: false,
       sizeBytes: 0,
-      lastModified: Date.now(),
+      lastModified: 0,
       hasNether: false,
       hasEnd: false
     });
