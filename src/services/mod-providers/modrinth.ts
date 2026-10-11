@@ -41,17 +41,48 @@ export interface ModrinthVersion {
   dependencies: ModrinthVersionDependency[];
 }
 
+export interface ModCategoryOption {
+  id: string;
+  name: string;
+}
+
+export const POPULAR_MOD_CATEGORIES: ModCategoryOption[] = [
+  { id: 'all', name: 'All Categories' },
+  { id: 'optimization', name: 'Optimization' },
+  { id: 'technology', name: 'Technology' },
+  { id: 'magic', name: 'Magic' },
+  { id: 'adventure', name: 'Adventure & RPG' },
+  { id: 'worldgen', name: 'World Generation' },
+  { id: 'storage', name: 'Storage' },
+  { id: 'decoration', name: 'Decoration' },
+  { id: 'utility', name: 'Utility & Tools' },
+  { id: 'management', name: 'Server Management' },
+  { id: 'library', name: 'APIs & Libraries' },
+  { id: 'equipment', name: 'Equipment' },
+  { id: 'economy', name: 'Economy' },
+  { id: 'gameplay', name: 'Gameplay' }
+];
+
 export async function searchModrinth(
   query: string,
   gameVersion?: string,
   loader?: MinecraftLoader,
+  category?: string,
+  hideClientOnly: boolean = true,
   limit: number = 20,
   offset: number = 0
 ): Promise<{ mods: ModItem[]; total: number }> {
   const facets: string[][] = [
-    ['project_type:mod'],
-    ['server_side:required', 'server_side:optional']
+    ['project_type:mod']
   ];
+
+  if (hideClientOnly) {
+    facets.push(['server_side:required', 'server_side:optional']);
+  }
+
+  if (category && category !== 'all') {
+    facets.push([`categories:${category}`]);
+  }
 
   if (loader && loader !== 'vanilla') {
     // Paper/Purpur use plugins, fabric/forge/neoforge use mods
@@ -89,10 +120,16 @@ export async function searchModrinth(
     provider: 'modrinth',
     installed: false,
     categories: hit.categories,
-    websiteUrl: `https://modrinth.com/mod/${hit.slug}`
+    websiteUrl: `https://modrinth.com/mod/${hit.slug}`,
+    serverSide: hit.server_side,
+    clientSide: hit.client_side,
+    isClientOnly: hit.server_side === 'unsupported'
   }));
 
-  return { mods, total: data.total_hits };
+  // Extra safety filter in case any unsupported mods slipped through
+  const filtered = hideClientOnly ? mods.filter(m => !m.isClientOnly) : mods;
+
+  return { mods: filtered, total: data.total_hits };
 }
 
 export async function getModrinthProjectVersions(

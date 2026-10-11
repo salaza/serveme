@@ -36,6 +36,9 @@ export interface ModItem {
   enabled?: boolean;
   categories?: string[];
   websiteUrl?: string;
+  serverSide?: 'required' | 'optional' | 'unsupported' | string;
+  clientSide?: 'required' | 'optional' | 'unsupported' | string;
+  isClientOnly?: boolean;
 }
 
 export interface InstalledMod {
