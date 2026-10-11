@@ -2,7 +2,6 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react'
 import { ServerInstance, PortCheckResult, JavaVersionInfo } from '../types';
 import {
   Sliders,
-  Save,
   FileCode,
   CheckCircle2,
   HardDrive,
@@ -12,13 +11,10 @@ import {
   Network,
   Loader2,
   Coffee,
-  ExternalLink,
   Search,
   Plus,
   Trash2,
-  Filter,
   AlertCircle,
-  Info,
   Sparkles,
   Gamepad2,
   Users,
@@ -26,7 +22,6 @@ import {
   Radio,
   Package,
   Wrench,
-  Check,
   X,
   Dices
 } from 'lucide-react';
@@ -38,8 +33,7 @@ import {
   PropertyCategory,
   PropertyDefinition,
   isPropertySupported,
-  getPropertyVersionNotice,
-  compareMcVersions
+  getPropertyVersionNotice
 } from '../constants/minecraftProperties';
 
 interface ConfigTabProps {
@@ -104,9 +98,13 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({ server, onServerUpdated })
 
   // Auto-save state
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
-  const isLoadedRef = useRef(false);
-  const saveDebounceTimer = useRef<NodeJS.Timeout | null>(null);
-  const rawSaveDebounceTimer = useRef<NodeJS.Timeout | null>(null);
+  const saveTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Stable references to prevent infinite re-render loops
+  const serverRef = useRef(server);
+  serverRef.current = server;
+  const onServerUpdatedRef = useRef(onServerUpdated);
+  onServerUpdatedRef.current = onServerUpdated;
 
   // Port test state
   const [isTestingPort, setIsTestingPort] = useState(false);
@@ -114,139 +112,99 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({ server, onServerUpdated })
   const [isPortModalOpen, setIsPortModalOpen] = useState(false);
   const [portTestSuccess, setPortTestSuccess] = useState<boolean | null>(null);
 
-  // Load properties on mount
-  useEffect(() => {
-    isLoadedRef.current = false;
-    loadProperties().then(() => {
-      isLoadedRef.current = true;
-    });
+  const loadProperties = useCallback(async () => {
+    try {
+      const props = await window.electronAPI.readServerProperties(serverRef.current.path);
+      setProperties(props);
 
+      const sep = window.navigator.userAgent.includes('Windows') ? '\\' : '/';
+      const raw = await window.electronAPI.readRawFile(`${serverRef.current.path}${sep}server.properties`);
+      setRawText(raw);
+    } catch (err) {
+      console.error('Failed to read server properties:', err);
+    }
+  }, []);
+
+  // Load properties on mount or server id change
+  useEffect(() => {
+    loadProperties();
     window.electronAPI.detectJava().then((list) => {
       setDetectedJavas(list);
     });
-  }, [server.id, server.path]);
 
-  const loadProperties = async () => {
-    const props = await window.electronAPI.readServerProperties(server.path);
-    setProperties(props);
+    return () => {
+      if (saveTimerRef.current) {
+        clearTimeout(saveTimerRef.current);
+      }
+    };
+  }, [server.id, server.path, loadProperties]);
 
-    // Also load raw text
-    const sep = window.navigator.userAgent.includes('Windows') ? '\\' : '/';
-    const raw = await window.electronAPI.readRawFile(`${server.path}${sep}server.properties`);
-    setRawText(raw);
-  };
-
-  // Perform actual save to disk
-  const persistChanges = useCallback(
-    async (
-      currentProperties: Record<string, string>,
-      currentRamMin: number,
-      currentRamMax: number,
-      currentJvmArgs: string,
-      currentJavaPath: string
+  // Clean, debounced save triggered ONLY on explicit user edits
+  const scheduleSave = useCallback(
+    (
+      propsToSave: Record<string, string>,
+      minRam: number,
+      maxRam: number,
+      jvm: string,
+      java: string
     ) => {
       setSaveStatus('saving');
-      try {
-        await window.electronAPI.saveServerProperties(server.path, currentProperties);
-
-        // Update rawText cache
-        const sep = window.navigator.userAgent.includes('Windows') ? '\\' : '/';
-        const raw = await window.electronAPI.readRawFile(`${server.path}${sep}server.properties`);
-        setRawText(raw);
-
-        // Synchronize port if changed
-        let finalPort = server.port;
-        if (currentProperties['server-port']) {
-          const parsed = parseInt(currentProperties['server-port'], 10);
-          if (!isNaN(parsed) && parsed > 0) {
-            finalPort = parsed;
-          }
-        }
-
-        const updatedServer: ServerInstance = {
-          ...server,
-          port: finalPort,
-          ramMin: currentRamMin,
-          ramMax: currentRamMax,
-          jvmArgs: currentJvmArgs,
-          javaPath: currentJavaPath
-        };
-
-        await window.electronAPI.saveServer(updatedServer);
-        onServerUpdated(updatedServer);
-
-        setSaveStatus('saved');
-        setTimeout(() => {
-          setSaveStatus((prev) => (prev === 'saved' ? 'idle' : prev));
-        }, 2200);
-      } catch (err) {
-        console.error('Failed to auto-save properties:', err);
-        setSaveStatus('idle');
+      if (saveTimerRef.current) {
+        clearTimeout(saveTimerRef.current);
       }
+
+      saveTimerRef.current = setTimeout(async () => {
+        try {
+          const currentSrv = serverRef.current;
+          await window.electronAPI.saveServerProperties(currentSrv.path, propsToSave);
+
+          // Synchronize port if changed
+          let finalPort = currentSrv.port;
+          if (propsToSave['server-port']) {
+            const parsed = parseInt(propsToSave['server-port'], 10);
+            if (!isNaN(parsed) && parsed > 0) {
+              finalPort = parsed;
+            }
+          }
+
+          const updatedServer: ServerInstance = {
+            ...currentSrv,
+            port: finalPort,
+            ramMin: minRam,
+            ramMax: maxRam,
+            jvmArgs: jvm,
+            javaPath: java
+          };
+
+          await window.electronAPI.saveServer(updatedServer);
+          onServerUpdatedRef.current(updatedServer);
+
+          setSaveStatus('saved');
+          setTimeout(() => {
+            setSaveStatus((prev) => (prev === 'saved' ? 'idle' : prev));
+          }, 2000);
+        } catch (err) {
+          console.error('Failed to auto-save properties:', err);
+          setSaveStatus('idle');
+        }
+      }, 500);
     },
-    [server, onServerUpdated]
+    []
   );
 
-  // Auto-save debounce effect for visual and JVM settings
-  useEffect(() => {
-    if (!isLoadedRef.current) return;
-
-    if (saveDebounceTimer.current) {
-      clearTimeout(saveDebounceTimer.current);
-    }
-
-    setSaveStatus('saving');
-    saveDebounceTimer.current = setTimeout(() => {
-      persistChanges(properties, ramMin, ramMax, jvmArgs, javaPath);
-    }, 600);
-
-    return () => {
-      if (saveDebounceTimer.current) {
-        clearTimeout(saveDebounceTimer.current);
-      }
-    };
-  }, [properties, ramMin, ramMax, jvmArgs, javaPath, persistChanges]);
-
-  // Auto-save effect for raw text subtab
-  useEffect(() => {
-    if (!isLoadedRef.current || activeSubTab !== 'raw') return;
-
-    if (rawSaveDebounceTimer.current) {
-      clearTimeout(rawSaveDebounceTimer.current);
-    }
-
-    setSaveStatus('saving');
-    rawSaveDebounceTimer.current = setTimeout(async () => {
-      try {
-        const sep = window.navigator.userAgent.includes('Windows') ? '\\' : '/';
-        await window.electronAPI.writeRawFile(`${server.path}${sep}server.properties`, rawText);
-        const props = await window.electronAPI.readServerProperties(server.path);
-        setProperties(props);
-        setSaveStatus('saved');
-        setTimeout(() => {
-          setSaveStatus((prev) => (prev === 'saved' ? 'idle' : prev));
-        }, 2200);
-      } catch (err) {
-        console.error('Failed to auto-save raw config:', err);
-        setSaveStatus('idle');
-      }
-    }, 800);
-
-    return () => {
-      if (rawSaveDebounceTimer.current) {
-        clearTimeout(rawSaveDebounceTimer.current);
-      }
-    };
-  }, [rawText, activeSubTab, server.path]);
-
   const updateProp = (key: string, value: string) => {
-    setProperties((prev) => ({ ...prev, [key]: value }));
+    setProperties((prev) => {
+      const next = { ...prev, [key]: value };
+      scheduleSave(next, ramMin, ramMax, jvmArgs, javaPath);
+      return next;
+    });
   };
 
   const removeProp = (key: string) => {
     setProperties((prev) => {
       const next = { ...prev };
       delete next[key];
+      scheduleSave(next, ramMin, ramMax, jvmArgs, javaPath);
       return next;
     });
   };
@@ -261,22 +219,58 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({ server, onServerUpdated })
     setIsAddingCustom(false);
   };
 
+  const handleRamMinChange = (val: number) => {
+    setRamMin(val);
+    scheduleSave(properties, val, ramMax, jvmArgs, javaPath);
+  };
+
+  const handleRamMaxChange = (val: number) => {
+    setRamMax(val);
+    scheduleSave(properties, ramMin, val, jvmArgs, javaPath);
+  };
+
+  const handleJvmArgsChange = (val: string) => {
+    setJvmArgs(val);
+    scheduleSave(properties, ramMin, ramMax, val, javaPath);
+  };
+
+  const handleJavaPathChange = (val: string) => {
+    setJavaPath(val);
+    scheduleSave(properties, ramMin, ramMax, jvmArgs, val);
+  };
+
   const handleApplyAikarFlags = () => {
     const aikar =
       '-XX:+UseG1GC -XX:+ParallelRefProcEnabled -XX:MaxGCPauseMillis=200 -XX:+UnlockExperimentalVMOptions -XX:+DisableExplicitGC -XX:+AlwaysPreTouch -XX:G1NewSizePercent=30 -XX:G1MaxNewSizePercent=40 -XX:G1ReservePercent=20 -XX:G1HeapWastePercent=5 -XX:G1MixedGCCountTarget=4 -XX:InitiatingHeapOccupancyPercent=15 -XX:G1MixedGCLiveThresholdPercent=90 -XX:G1RSetUpdatingPauseTimePercent=5 -XX:SurvivorRatio=32 -XX:+PerfDisableSharedMem -XX:MaxTenuringThreshold=1';
     setJvmArgs(aikar);
+    scheduleSave(properties, ramMin, ramMax, aikar, javaPath);
   };
 
-  const handleManualSave = async () => {
-    if (activeSubTab === 'raw') {
-      const sep = window.navigator.userAgent.includes('Windows') ? '\\' : '/';
-      await window.electronAPI.writeRawFile(`${server.path}${sep}server.properties`, rawText);
-      await loadProperties();
-      setSaveStatus('saved');
-      setTimeout(() => setSaveStatus('idle'), 2000);
-    } else {
-      await persistChanges(properties, ramMin, ramMax, jvmArgs, javaPath);
+  const handleRawTextChange = (val: string) => {
+    setRawText(val);
+    setSaveStatus('saving');
+    if (saveTimerRef.current) {
+      clearTimeout(saveTimerRef.current);
     }
+
+    saveTimerRef.current = setTimeout(async () => {
+      try {
+        const sep = window.navigator.userAgent.includes('Windows') ? '\\' : '/';
+        await window.electronAPI.writeRawFile(`${serverRef.current.path}${sep}server.properties`, val);
+        setSaveStatus('saved');
+        setTimeout(() => {
+          setSaveStatus((prev) => (prev === 'saved' ? 'idle' : prev));
+        }, 2000);
+      } catch (err) {
+        console.error('Failed to auto-save raw config:', err);
+        setSaveStatus('idle');
+      }
+    }, 600);
+  };
+
+  const handleSubTabChange = (tab: 'visual' | 'jvm' | 'raw') => {
+    setActiveSubTab(tab);
+    loadProperties();
   };
 
   const handleTestPort = async () => {
@@ -378,7 +372,7 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({ server, onServerUpdated })
       <div className="flex items-center justify-between bg-slate-900/80 p-2.5 rounded-xl border border-slate-800">
         <div className="flex items-center gap-1.5">
           <button
-            onClick={() => setActiveSubTab('visual')}
+            onClick={() => handleSubTabChange('visual')}
             className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-2 ${
               activeSubTab === 'visual'
                 ? 'bg-slate-800 text-emerald-400 border border-slate-700 shadow-sm'
@@ -390,7 +384,7 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({ server, onServerUpdated })
           </button>
 
           <button
-            onClick={() => setActiveSubTab('jvm')}
+            onClick={() => handleSubTabChange('jvm')}
             className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-2 ${
               activeSubTab === 'jvm'
                 ? 'bg-slate-800 text-emerald-400 border border-slate-700 shadow-sm'
@@ -402,7 +396,7 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({ server, onServerUpdated })
           </button>
 
           <button
-            onClick={() => setActiveSubTab('raw')}
+            onClick={() => handleSubTabChange('raw')}
             className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-2 ${
               activeSubTab === 'raw'
                 ? 'bg-slate-800 text-emerald-400 border border-slate-700 shadow-sm'
@@ -414,8 +408,8 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({ server, onServerUpdated })
           </button>
         </div>
 
-        {/* Auto-save Status & Controls */}
-        <div className="flex items-center gap-3">
+        {/* Clean Auto-save Status (No redundant button or idle text) */}
+        <div className="flex items-center pr-1">
           {saveStatus === 'saving' && (
             <div className="flex items-center gap-1.5 text-xs text-amber-400 font-medium animate-pulse">
               <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -424,28 +418,11 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({ server, onServerUpdated })
           )}
 
           {saveStatus === 'saved' && (
-            <div className="flex items-center gap-1.5 text-xs text-emerald-400 font-medium animate-in fade-in">
+            <div className="flex items-center gap-1.5 text-xs text-emerald-400 font-medium animate-in fade-in duration-200">
               <CheckCircle2 className="w-4 h-4" />
-              <span>All changes saved</span>
+              <span>Saved</span>
             </div>
           )}
-
-          {saveStatus === 'idle' && (
-            <div className="flex items-center gap-1 text-[11px] text-slate-500 font-medium">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500/80 inline-block" />
-              <span>Auto-save active</span>
-            </div>
-          )}
-
-          <button
-            onClick={handleManualSave}
-            disabled={saveStatus === 'saving'}
-            className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 rounded-lg text-xs font-medium flex items-center gap-1.5 transition disabled:opacity-50"
-            title="Force immediate save"
-          >
-            <Save className="w-3.5 h-3.5 text-emerald-400" />
-            <span>Save Now</span>
-          </button>
         </div>
       </div>
 
@@ -867,7 +844,7 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({ server, onServerUpdated })
                   min="1"
                   max="16"
                   value={ramMin}
-                  onChange={(e) => setRamMin(parseInt(e.target.value, 10))}
+                  onChange={(e) => handleRamMinChange(parseInt(e.target.value, 10))}
                   className="w-full accent-emerald-500 cursor-pointer"
                 />
               </div>
@@ -882,7 +859,7 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({ server, onServerUpdated })
                   min="1"
                   max="32"
                   value={ramMax}
-                  onChange={(e) => setRamMax(parseInt(e.target.value, 10))}
+                  onChange={(e) => handleRamMaxChange(parseInt(e.target.value, 10))}
                   className="w-full accent-emerald-500 cursor-pointer"
                 />
               </div>
@@ -906,7 +883,7 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({ server, onServerUpdated })
                 <label className="text-[11px] text-slate-400 block font-medium">Detected Java Installations:</label>
                 <select
                   value={javaPath}
-                  onChange={(e) => setJavaPath(e.target.value)}
+                  onChange={(e) => handleJavaPathChange(e.target.value)}
                   className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-emerald-500 font-mono"
                 >
                   <option value="java">Default System &quot;java&quot; command</option>
@@ -924,7 +901,7 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({ server, onServerUpdated })
               <input
                 type="text"
                 value={javaPath}
-                onChange={(e) => setJavaPath(e.target.value)}
+                onChange={(e) => handleJavaPathChange(e.target.value)}
                 placeholder="e.g. C:\Program Files\Java\jdk-21\bin\java.exe"
                 className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-emerald-500 font-mono"
               />
@@ -949,7 +926,7 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({ server, onServerUpdated })
             <textarea
               rows={4}
               value={jvmArgs}
-              onChange={(e) => setJvmArgs(e.target.value)}
+              onChange={(e) => handleJvmArgsChange(e.target.value)}
               placeholder="-XX:+UseG1GC -XX:+UnlockExperimentalVMOptions..."
               className="w-full bg-slate-900 border border-slate-800 rounded-xl p-3 text-xs text-white font-mono focus:outline-none focus:border-emerald-500"
             />
@@ -969,7 +946,7 @@ export const ConfigTab: React.FC<ConfigTabProps> = ({ server, onServerUpdated })
           </div>
           <textarea
             value={rawText}
-            onChange={(e) => setRawText(e.target.value)}
+            onChange={(e) => handleRawTextChange(e.target.value)}
             className="flex-1 w-full bg-slate-900 border border-slate-800 rounded-xl p-4 font-mono text-xs text-slate-200 focus:outline-none focus:border-emerald-500 resize-none leading-relaxed"
           />
         </div>
